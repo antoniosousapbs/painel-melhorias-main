@@ -1,0 +1,62 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+build-output/
+deploy-package/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Binary blobs / large assets
+*.zip
+
+# Python build scripts (used locally to generate sprites, not needed in repo)
+apps/web/public/pati/*.py
+
+# One-off debug / check scripts (root of api app)
+apps/api/check-*.ts
+apps/api/check-*.js
+apps/api/fix-*.ts
+apps/api/test-*.js
+apps/api/find-*.ts
+apps/api/test-insert-*.ts
+
+# Root-level dev/build scripts (not part of the application)
+*.ps1
+backfill-*.js
+check-*.js
+cleanup-*.js
+insert-*.js
+scan-*.js
+verify-*.ps1
+scripts/
+
+# Source sprite assets (only the cropped /pati/*.png expressions are needed)
+apps/web/public/pati/*.py
+apps/web/public/pati/PATI.png
+apps/web/public/pati/pati_feminina.png
+apps/web/public/pati_full*.png
+apps/web/public/pati-avatar.png
+apps/web/public/pati-face.png
+apps/web/public/pati.png
+apps/web/public/pipo*.png
+
+# Test images
+test_animada.png

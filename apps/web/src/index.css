@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'DM Sans', system-ui, sans-serif;
+  font-size: 14px;
+  background: #f7f8fa;
+  color: #0f1117;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Category badges */
+.badge-produto    { background: #eff6ff; color: #1d4ed8; }
+.badge-hibrido    { background: #eef2ff; color: #4338ca; }
+.badge-cliente    { background: #f1f5f9; color: #475569; }
+.badge-info       { background: #fef9c3; color: #854d0e; }
+
+/* Priority colors */
+.prio-must        { color: #dc2626; font-weight: 600; }
+.prio-should      { color: #d97706; font-weight: 500; }
+.prio-could       { color: #8891a4; }
+.prio-wont        { color: #8891a4; text-decoration: line-through; }
+
+/* Dropdown focus ring */
+.focus-ring:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+  outline: none;
+}
