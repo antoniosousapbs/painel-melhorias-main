@@ -88,7 +88,7 @@ function fmt(value: string | null | undefined): string {
 interface ItemsCache {
   key: string; ts: number;
   items: WorkItem[]; // full dataset for current dimension filters
-  docStatus: Record<number, { apf: boolean; apfExcel: boolean; spec: boolean }>;
+  docStatus: Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>;
 }
 // KPI/Chart cache (only reacts to dimension filters, NOT search/page)
 interface KpiChartCache {
@@ -159,7 +159,7 @@ export default function Dashboard() {
   const [auditItem, setAuditItem] = useState<{ id: number; title: string } | null>(null);
 
   // Document status for all items
-  const [docStatus, setDocStatus] = useState<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean }>>(_initDocStatus);
+  const [docStatus, setDocStatus] = useState<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>>(_initDocStatus);
 
   // ── Client-side search + pagination (ZERO network calls) ──────────────
   const filteredItems = useMemo(() => {
@@ -222,7 +222,7 @@ export default function Dashboard() {
       // Fetch doc status for all items in background
       const ids = (itemsData.items as WorkItem[]).map(i => i.Id);
       fetchDocStatus(ids).then(ds => {
-        setDocStatus(ds as Record<number, { apf: boolean; apfExcel: boolean; spec: boolean }>);
+        setDocStatus(ds as Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>);
         const nc: ItemsCache = { key, ts: Date.now(), items: itemsData.items, docStatus: ds as any };
         _itemsCache = nc; writeSSCache(nc);
       }).catch(() => {
@@ -753,6 +753,12 @@ export default function Dashboard() {
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#033AF0" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
                           </button>
                         )}
+                        {docStatus[item.Id]?.specDocx && (
+                          <button onClick={e => { e.stopPropagation(); downloadDocument(getDocDownloadUrl(item.Id, 'SPEC_DOCX'), `spec-${item.Id}.docx`).catch(err => alert(err.message)); }} title="Baixar Especificação de Negócio (Word)"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded bg-[#eef2ff] border border-[#c7d2fe] hover:bg-[#c7d2fe] transition-colors cursor-pointer">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2b579a" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><text x="7" y="18" fontSize="7" fontWeight="bold" stroke="none" fill="#2b579a">W</text></svg>
+                          </button>
+                        )}
                         {docStatus[item.Id]?.apf && (
                           <button onClick={e => { e.stopPropagation(); downloadDocument(getDocDownloadUrl(item.Id, 'APF'), `apf-${item.Id}.pdf`).catch(err => alert(err.message)); }} title="Baixar APF (PDF)"
                             className="inline-flex items-center justify-center w-7 h-7 rounded bg-[#fff7ed] border border-[#fed7aa] hover:bg-[#fed7aa] transition-colors cursor-pointer">
@@ -765,7 +771,7 @@ export default function Dashboard() {
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><path d="M8 13l2.5 3L8 19M16 13l-2.5 3L16 19"/></svg>
                           </button>
                         )}
-                        {!docStatus[item.Id]?.spec && !docStatus[item.Id]?.apf && !docStatus[item.Id]?.apfExcel && (
+                        {!docStatus[item.Id]?.spec && !docStatus[item.Id]?.specDocx && !docStatus[item.Id]?.apf && !docStatus[item.Id]?.apfExcel && (
                           <span className="text-txt-3 text-[11px]">—</span>
                         )}
                         <button

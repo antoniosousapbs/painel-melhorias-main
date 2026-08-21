@@ -9,6 +9,26 @@ let _cachedContext: string | null = null;
 let _cachedAt = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Mantém as mensagens mais RECENTES do histórico dentro de um orçamento de CARACTERES, em vez
+// de um número fixo de mensagens (ex.: as antigas history.slice(-10)/(-6)). Um corte por
+// CONTAGEM quebra entrevistas longas: cada turno de entrevista é 1 pergunta + 1 resposta (2
+// mensagens), então slice(-10) só enxerga os últimos ~5 turnos — a PATi "esquece" tudo antes
+// disso e repete perguntas já respondidas (bug real reportado com entrevistas de 15+ turnos).
+// Um orçamento de caracteres generoso cobre dezenas de turnos reais (mensagens já limitadas a
+// 1000 chars no cliente) sem chegar perto da janela de contexto de nenhum provider configurado
+// (Groq 128k tokens, GPT-5.4 922k tokens de input) nem do limite de tamanho por requisição.
+function trimHistoryByBudget(history: { role: string; content: string }[], maxChars = 16000): { role: string; content: string }[] {
+  let total = 0;
+  const kept: { role: string; content: string }[] = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const len = history[i].content.length;
+    if (kept.length > 0 && total + len > maxChars) break; // sempre mantém ao menos a última mensagem
+    total += len;
+    kept.unshift(history[i]);
+  }
+  return kept;
+}
+
 // ── Data-fetching tools the LLM context is built from ──────────────
 
 
@@ -347,7 +367,7 @@ ${contextBlock}`;
 
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...history.slice(-6),
+    ...trimHistoryByBudget(history),
     { role: 'user', content: userMessage },
   ];
 
@@ -425,7 +445,7 @@ export async function* streamInterview(
     .trim()
     .slice(0, 1500);
 
-  const tipoLabel = tipo === 'SPEC' ? 'Especificação de Negócio' : 'APF (Análise de Pontos de Função)';
+  const tipoLabel = tipo === 'SPEC' ? 'Especificação de Negócio' : tipo === 'APF' ? 'APF (Análise de Pontos de Função)' : 'APF + Especificação de Negócio';
 
   const patiData = (wi.DiscussionPati || '').trim().slice(0, 350);
   const hasPati = patiData.length > 0;
@@ -438,8 +458,12 @@ export async function* streamInterview(
 
   // Elementos já contados (tabela estruturada, não só prosa) — permite à PATi saber EXATAMENTE
   // o que já existe e perguntar qual elemento o analista quer ajustar, em vez de adivinhar.
+  // Só entra em jogo quando o tipo pedido envolve APF — numa geração de Especificação pura,
+  // uma contagem de APF pré-existente é irrelevante e não deve direcionar a entrevista para
+  // "o que você quer ajustar" (isso confundia o fluxo de geração de Especificação).
+  const isApfFocused = tipo === 'APF' || tipo === 'AMBOS';
   const elementosSummary = await getApfElementsSummary(workItemId);
-  const hasElementos = elementosSummary.length > 0;
+  const hasElementos = isApfFocused && elementosSummary.length > 0;
 
   const systemPrompt = `Você é a PATi, agente de suporte inteligente da Paradigma.
 Seu objetivo agora é **entrevistar o analista** para coletar informações suficientes para gerar um documento de **${tipoLabel}** para o chamado #${workItemId}.
@@ -489,7 +513,7 @@ ${hasElementos
 
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...history.slice(-10),
+    ...trimHistoryByBudget(history),
   ];
 
   // If no history (first interaction), add a trigger and inject [PATI] status as first SSE chunk
@@ -605,7 +629,7 @@ ${itemsSummary}
 
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...history.slice(-10),
+    ...trimHistoryByBudget(history),
   ];
 
   if (history.length === 0) {

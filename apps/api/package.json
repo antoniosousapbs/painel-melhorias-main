@@ -2,16 +2,20 @@
   "name": "api",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc && npm run copy-assets",
     "copy-assets": "node -e \"const fs=require('fs'),path=require('path');const src=path.resolve('templates');const dst=path.resolve('dist/templates');if(fs.existsSync(src)){fs.cpSync(src,dst,{recursive:true});console.log('✅ templates/ copiado para dist/templates/');}\"",
     "start": "node dist/index.js",
     "db:migrate": "tsx src/db/migrate.ts",
-    "verify:excel": "tsx src/db/verify-excel-template.ts"
+    "verify:excel": "tsx src/db/verify-excel-template.ts",
+    "verify:spec-docx": "tsx src/db/verify-spec-docx.ts",
+    "verify:template-generic": "tsx src/db/verify-template-generic.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "docxtemplater": "^3.69.3",
     "dotenv": "^16.3.1",
     "exceljs": "^4.4.0",
     "express": "^4.18.2",
@@ -21,7 +25,8 @@
     "mssql": "^10.0.2",
     "node-cron": "^3.0.3",
     "node-fetch": "^3.3.2",
-    "pdfkit": "^0.18.0"
+    "pdfkit": "^0.18.0",
+    "pizzip": "^3.2.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

@@ -54,6 +54,7 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
 
   const apf = versions.filter(v => v.Tipo === 'APF');
   const spec = versions.filter(v => v.Tipo === 'SPEC');
+  const specDocx = versions.filter(v => v.Tipo === 'SPEC_DOCX');
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -84,7 +85,7 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
             <p className="text-[13px] text-txt-3 animate-pulse">Carregando versões…</p>
           )}
 
-          {!loading && apf.length === 0 && spec.length === 0 && (
+          {!loading && apf.length === 0 && spec.length === 0 && specDocx.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 gap-2 text-center">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1.5">
                 <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
@@ -97,6 +98,7 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
           {[
             { label: 'APF', icon: '🟠', items: apf },
             { label: 'SPEC', icon: '🔵', items: spec },
+            { label: 'ESPECIFICAÇÃO (Word)', icon: '📘', items: specDocx },
           ].map(({ label, icon, items }) =>
             items.length > 0 ? (
               <div key={label} className="mb-5">
@@ -125,14 +127,14 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
                         <div className="flex items-center gap-2">
                           {/* Download links */}
                           <button
-                            onClick={e => { e.stopPropagation(); downloadDocument(`${API_BASE}/documents/${workItemId}/versions/${v.Id}/download`, `${v.Tipo.toLowerCase()}-${workItemId}-v${v.Versao}.pdf`).catch(err => alert(err.message)); }}
-                            title={`Baixar ${v.Tipo} v${v.Versao} (PDF)`}
+                            onClick={e => { e.stopPropagation(); const ext = v.Tipo === 'SPEC_DOCX' ? 'docx' : 'pdf'; downloadDocument(`${API_BASE}/documents/${workItemId}/versions/${v.Id}/download`, `${v.Tipo.toLowerCase()}-${workItemId}-v${v.Versao}.${ext}`).catch(err => alert(err.message)); }}
+                            title={`Baixar ${v.Tipo} v${v.Versao} (${v.Tipo === 'SPEC_DOCX' ? 'Word' : 'PDF'})`}
                             className="flex items-center gap-1 text-[11px] text-[#1d4ed8] hover:text-[#1e40af] font-medium cursor-pointer"
                           >
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
                             </svg>
-                            PDF
+                            {v.Tipo === 'SPEC_DOCX' ? 'DOCX' : 'PDF'}
                           </button>
                           {v.Tipo === 'APF' && (
                             <button

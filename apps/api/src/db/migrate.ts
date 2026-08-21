@@ -354,6 +354,12 @@ Retorne APENAS um JSON valido:')
     ALTER TABLE DocumentosGerados ADD ElementosJson NVARCHAR(MAX);
   `);
 
+  // Snapshot estruturado (JSON) da Especificação de Negócio gerada via template Word (SPEC_DOCX)
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('DocumentosGerados') AND name = 'EspecificacaoJson')
+    ALTER TABLE DocumentosGerados ADD EspecificacaoJson NVARCHAR(MAX);
+  `);
+
   // APF Refinement history table
   await pool.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'ApfRefinamentos')
@@ -467,6 +473,13 @@ Retorne APENAS um JSON valido:')
     );
   `);
 
+  // Snapshot estruturado (JSON) da Especificação de Negócio — mesma ideia do ElementosJson do APF,
+  // permite reconstruir/reexportar o docx sem rodar a IA de novo.
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('DocumentVersionHistory') AND name = 'EspecificacaoJson')
+    ALTER TABLE DocumentVersionHistory ADD EspecificacaoJson NVARCHAR(MAX);
+  `);
+
   // ── InterviewSessions: conflict detection for concurrent users ───────────────
   await pool.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'InterviewSessions')
@@ -565,6 +578,21 @@ Retorne APENAS um JSON valido:')
   // Semántica inicial: só roda se a tabela LlmProviders estiver vazia (não sobrescreve
   // configuração já feita pela UI). Lê credenciais de variáveis de ambiente — nunca hardcoded.
   await ensureSeedProviders();
+
+  // Novas finalidades (spec_estruturacao/spec_revisao) em bancos já existentes (onde
+  // ensureSeedProviders não roda de novo, pois LlmProviders já não está vazio): copia a
+  // configuração já feita para 'spec_geracao', se houver, em vez de deixar sem provider.
+  await pool.request().query(`
+    IF EXISTS (SELECT 1 FROM LlmUsoConfig WHERE Finalidade = 'spec_geracao')
+    BEGIN
+      INSERT INTO LlmUsoConfig (Finalidade, ProviderId, FallbackProviderId)
+      SELECT 'spec_estruturacao', ProviderId, FallbackProviderId FROM LlmUsoConfig WHERE Finalidade = 'spec_geracao'
+        AND NOT EXISTS (SELECT 1 FROM LlmUsoConfig WHERE Finalidade = 'spec_estruturacao');
+      INSERT INTO LlmUsoConfig (Finalidade, ProviderId, FallbackProviderId)
+      SELECT 'spec_revisao', ProviderId, FallbackProviderId FROM LlmUsoConfig WHERE Finalidade = 'spec_geracao'
+        AND NOT EXISTS (SELECT 1 FROM LlmUsoConfig WHERE Finalidade = 'spec_revisao');
+    END
+  `);
 
   await pool.close();
 }

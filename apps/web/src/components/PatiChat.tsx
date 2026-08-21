@@ -54,7 +54,8 @@ function isDocumentRequest(msg: string): { match: boolean; tipo: 'APF' | 'SPEC' 
 
   // Check for document keywords early (APF, spec, etc.)
   const hasApf = /(apf|ponto.* de fun|contagem|metr)/.test(lower);
-  const hasSpec = /(spec|especifica|espec\b|negocio)/.test(lower);
+  // "especif" (em vez de "especifica") tolera erros de digitação comuns como "especifcação"
+  const hasSpec = /(spec|especif|espec\b|negocio)/.test(lower);
   const hasBoth = /(ambos|dois|tudo|documento|docs|arquivo)/.test(lower);
   const hasDocKeyword = hasApf || hasSpec || hasBoth;
 
@@ -310,12 +311,12 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, [sessionId]);
 
   /* ─── Document generation via SSE ─── */
-  const runDocGeneration = useCallback(async (tipo: 'APF' | 'SPEC' | 'AMBOS', ids: number[], force = false, interviewContext?: string, activeSid?: string) => {
+  const runDocGeneration = useCallback(async (tipo: 'APF' | 'SPEC' | 'SPEC_DOCX' | 'AMBOS', ids: number[], force = false, interviewContext?: string, activeSid?: string) => {
     setStreaming(true);
     setStatus('');
     setProgress(null);
 
-    const tipoLabel = tipo === 'APF' ? 'APF' : tipo === 'SPEC' ? 'Especificação' : 'APF + Especificação';
+    const tipoLabel = tipo === 'APF' ? 'APF' : (tipo === 'SPEC' || tipo === 'SPEC_DOCX') ? 'Especificação' : 'APF + Especificação';
     const scopeLabel = ids.length > 0 ? ` para ${ids.length} chamado(s)` : ' para todos com tag [PATI]';
     const forceLabel = force ? ' (recontagem forçada)' : '';
     if (!interviewContext) {
@@ -590,7 +591,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           } else {
             setMessages(prev => [...prev, { role: 'assistant', content: '⏳ Gerando documento com base nas informações coletadas...' }]);
             const ids = interviewState.bulk ? [] : [interviewState.workItemId];
-            await runDocGeneration(tipo, ids, contextFromInterview ? true : (interviewState.force ?? false), contextFromInterview, sidToUse ?? undefined);
+            // "Especificação" via chat usa o novo pipeline (template Word) por padrão.
+            const genTipo = tipo === 'SPEC' ? 'SPEC_DOCX' : tipo;
+            await runDocGeneration(genTipo, ids, contextFromInterview ? true : (interviewState.force ?? false), contextFromInterview, sidToUse ?? undefined);
           }
         } else {
           // PATi triggered prematurely (without user confirmation) → wait
@@ -685,7 +688,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           } else {
             setMessages(prev => [...prev, { role: 'assistant', content: '⏳ Gerando documento com base nas informações coletadas...' }]);
             const ids = interview.bulk ? [] : [interview.workItemId];
-            await runDocGeneration(tipo, ids, contextFromInterview ? true : (interview.force ?? false), contextFromInterview, sidToUse ?? undefined);
+            // "Especificação" via chat usa o novo pipeline (template Word) por padrão.
+            const genTipo = tipo === 'SPEC' ? 'SPEC_DOCX' : tipo;
+            await runDocGeneration(genTipo, ids, contextFromInterview ? true : (interview.force ?? false), contextFromInterview, sidToUse ?? undefined);
           }
           return;
         }
@@ -802,7 +807,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       if (lastId) {
         // Determine tipo from keywords
         const hasApfWord = /(apf|contagem|ponto.* fun)\w*/.test(lower);
-        const hasSpecWord = /(spec|especifica)\w*/.test(lower);
+        const hasSpecWord = /(spec|especif)\w*/.test(lower);
         const tipo: 'APF' | 'SPEC' | 'AMBOS' = hasApfWord && !hasSpecWord ? 'APF' : hasSpecWord && !hasApfWord ? 'SPEC' : 'AMBOS';
         // Start interview instead of generating directly
         const interviewState = { active: true, workItemId: lastId, tipo, history: [] as { role: string; content: string }[], bulk: false, force: false };
@@ -812,7 +817,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       }
       // Nenhum ID encontrado no histórico — pede ao usuário qual chamado
       const hasApfWord = /(apf|contagem|ponto.* fun)\w*/.test(lower);
-      const hasSpecWord = /(spec|especifica)\w*/.test(lower);
+      const hasSpecWord = /(spec|especif)\w*/.test(lower);
       const tipo: 'APF' | 'SPEC' | 'AMBOS' = hasApfWord && !hasSpecWord ? 'APF' : hasSpecWord && !hasApfWord ? 'SPEC' : 'AMBOS';
       const tipoLabel = tipo === 'APF' ? 'APF' : tipo === 'SPEC' ? 'Especificação' : 'APF + Especificação';
       setPendingDocTipo(tipo);
@@ -1055,7 +1060,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKey}
                 disabled={streaming}
-                maxLength={500}
+                maxLength={1000}
                 className="flex-1 resize-none bg-transparent text-[13px] text-[#0f1117] placeholder-[#9ca3af] outline-none leading-relaxed py-1 max-h-[240px] overflow-y-auto scrollbar-thin"
               />
               {streaming ? (

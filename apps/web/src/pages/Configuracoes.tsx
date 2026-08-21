@@ -967,7 +967,9 @@ export default function Configuracoes() {
             ['classificacao', 'Classificação automática'],
             ['apf_geracao', 'Geração de APF'],
             ['apf_refinamento', 'Refinamento de APF'],
-            ['spec_geracao', 'Geração de Especificação'],
+            ['spec_geracao', 'Geração de Especificação (PDF)'],
+            ['spec_estruturacao', 'Especificação — Estruturação (JSON)'],
+            ['spec_revisao', 'Especificação — Revisão automática'],
           ] as [LlmFinalidade, string][]).map(([finalidade, label]) => {
             const cfg = llmUso.find(u => u.Finalidade === finalidade);
             return (

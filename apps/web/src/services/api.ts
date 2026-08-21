@@ -129,7 +129,14 @@ export async function generateSpecDoc(id: number) {
   return res.json();
 }
 
-export function getDocDownloadUrl(id: number, tipo: 'APF' | 'SPEC' | 'APF_EXCEL') {
+// Novo pipeline (template Word) — coexiste com generateSpecDoc() acima, não substitui.
+export async function generateSpecDocxDoc(id: number) {
+  const res = await authFetch(`${API_BASE}/documents/${id}/generate-spec-docx`, { method: 'POST' });
+  if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'Falha ao gerar Especificação'); }
+  return res.json();
+}
+
+export function getDocDownloadUrl(id: number, tipo: 'APF' | 'SPEC' | 'APF_EXCEL' | 'SPEC_DOCX') {
   return `${API_BASE}/documents/${id}/download/${tipo}`;
 }
 
@@ -160,7 +167,7 @@ export async function downloadDocument(url: string, fallbackFilename: string) {
   URL.revokeObjectURL(objectUrl);
 }
 
-export async function fetchDocStatus(ids: number[]): Promise<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean }>> {
+export async function fetchDocStatus(ids: number[]): Promise<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>> {
   if (ids.length === 0) return {};
   const res = await authFetch(`${API_BASE}/documents/status`, {
     method: 'POST',
@@ -213,7 +220,7 @@ export async function updateApfDiretriz(projectCode: string, diretriz: string): 
 
 // ─── Modelos de IA (providers de LLM configuráveis) ───
 export type LlmKind = 'openai-compatible' | 'azure-ai-foundry';
-export type LlmFinalidade = 'chat' | 'classificacao' | 'apf_geracao' | 'apf_refinamento' | 'spec_geracao';
+export type LlmFinalidade = 'chat' | 'classificacao' | 'apf_geracao' | 'apf_refinamento' | 'spec_geracao' | 'spec_estruturacao' | 'spec_revisao';
 
 export interface LlmProvider {
   Id: number;

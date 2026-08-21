@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getPool, sql } from '../db/connection.js';
-import { generateApf, generateSpec, getDocument, getDocumentStatus, getApfParametros, updateApfParametros, refineApf, getApfElements, getKnowledgeBase, addKnowledge, updateKnowledge, deleteKnowledge, generateApfPdf, generateApfExcel, generateSpecPdf, calculateApf, getApfDiretrizes, upsertApfDiretriz, nextVersion } from '../services/document-generator.js';
+import { generateApf, generateSpec, generateSpecCompleta, getDocument, getDocumentStatus, getApfParametros, updateApfParametros, refineApf, getApfElements, getKnowledgeBase, addKnowledge, updateKnowledge, deleteKnowledge, generateApfPdf, generateApfExcel, generateSpecPdf, calculateApf, getApfDiretrizes, upsertApfDiretriz, nextVersion } from '../services/document-generator.js';
+import { generateSpecDocx } from '../services/spec-docx-generator.js';
 import { getWorkItem, getProjectFilter } from '../services/workitem.js';
 import { interviewHistoryToText } from '../utils/context.js';
 import { requireRole } from '../middleware/auth.js';
@@ -42,6 +43,31 @@ router.post('/:id/generate-spec', async (req, res) => {
     res.json({ success: true, length: result.content.length });
   } catch (err: any) {
     console.error('Spec generation error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/documents/:id/generate-spec-docx — pipeline novo (estruturação + revisão +
+// template Word). Coexiste com /generate-spec (PDF simples), não substitui.
+router.post('/:id/generate-spec-docx', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
+    const workItem = await getWorkItem(id, (req as any).userProjects);
+    if (!workItem) return res.status(404).json({ error: 'Chamado não encontrado' });
+    const extraContext = interviewHistoryToText(req.body?.interviewHistory);
+    const auditUser = tryExtractUser(req.headers.authorization);
+    const result = await generateSpecCompleta(id, extraContext || undefined, auditUser);
+    res.json({
+      success: true,
+      requisitos: result.spec.requisitosFuncionais.length,
+      regras: result.spec.regrasNegocio.length,
+      avisos: result.lacunas.avisos,
+      revisaoOk: result.revisao.ok,
+      observacoesRevisao: result.revisao.observacoes,
+    });
+  } catch (err: any) {
+    console.error('Spec docx generation error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -89,12 +115,12 @@ router.get('/:id/apf-elements', async (req, res) => {
   }
 });
 
-// GET /api/documents/:id/download/:tipo (APF, APF_EXCEL, or SPEC)
+// GET /api/documents/:id/download/:tipo (APF, APF_EXCEL, SPEC ou SPEC_DOCX)
 router.get('/:id/download/:tipo', async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const tipo = req.params.tipo.toUpperCase();
-    if (!['APF', 'APF_EXCEL', 'SPEC'].includes(tipo)) return res.status(400).json({ error: 'Tipo deve ser APF, APF_EXCEL ou SPEC' });
+    if (!['APF', 'APF_EXCEL', 'SPEC', 'SPEC_DOCX'].includes(tipo)) return res.status(400).json({ error: 'Tipo deve ser APF, APF_EXCEL, SPEC ou SPEC_DOCX' });
 
     // Garante que o work item está dentro do escopo de projetos do usuário
     const workItem = await getWorkItem(id, (req as any).userProjects);
@@ -105,6 +131,8 @@ router.get('/:id/download/:tipo', async (req, res) => {
 
     if (tipo === 'APF_EXCEL') {
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    } else if (tipo === 'SPEC_DOCX') {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     } else {
       res.setHeader('Content-Type', 'application/pdf');
     }
@@ -290,7 +318,11 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
   }
 
   const generateApfDoc = tipo === 'APF' || tipo === 'AMBOS';
-  const generateSpecDoc = tipo === 'SPEC' || tipo === 'AMBOS';
+  // 'SPEC' (PDF simples, legado) só é gerado quando pedido explicitamente por esse tipo —
+  // o chat da PATi agora usa 'SPEC_DOCX' (novo pipeline) tanto para especificação isolada
+  // quanto dentro de 'AMBOS' (APF + Especificação).
+  const generateSpecDoc = tipo === 'SPEC';
+  const generateSpecDocxDoc = tipo === 'SPEC_DOCX' || tipo === 'AMBOS';
 
   // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
@@ -312,7 +344,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = null; } };
 
   // Validate items — check existing docs
-  const validItems: { Id: number; Title: string; ClienteNome: string; hasApf: boolean; hasSpec: boolean }[] = [];
+  const validItems: { Id: number; Title: string; ClienteNome: string; hasApf: boolean; hasSpec: boolean; hasSpecDocx: boolean }[] = [];
 
   for (const id of workItemIds) {
     const r = pool.request().input('id', sql.Int, id);
@@ -321,12 +353,13 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
     const result = await r.query(`
         SELECT w.Id, w.Title, w.ClienteNome,
           CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'APF') THEN 1 ELSE 0 END as hasApf,
-          CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'SPEC') THEN 1 ELSE 0 END as hasSpec
+          CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'SPEC') THEN 1 ELSE 0 END as hasSpec,
+          CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'SPEC_DOCX') THEN 1 ELSE 0 END as hasSpecDocx
         FROM WorkItems w WHERE w.Id = @id ${pf.clause}
       `);
     if (result.recordset.length > 0) {
       const row = result.recordset[0];
-      validItems.push({ ...row, hasApf: row.hasApf === 1, hasSpec: row.hasSpec === 1 });
+      validItems.push({ ...row, hasApf: row.hasApf === 1, hasSpec: row.hasSpec === 1, hasSpecDocx: row.hasSpecDocx === 1 });
     }
   }
 
@@ -337,7 +370,8 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
   for (const item of validItems) {
     const needsApf = generateApfDoc && (!item.hasApf || forceRegenerate);
     const needsSpec = generateSpecDoc && (!item.hasSpec || forceRegenerate);
-    if (needsApf || needsSpec) {
+    const needsSpecDocx = generateSpecDocxDoc && (!item.hasSpecDocx || forceRegenerate);
+    if (needsApf || needsSpec || needsSpecDocx) {
       itemsToProcess.push(item);
     } else {
       skipped++;
@@ -349,6 +383,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
   for (const item of itemsToProcess) {
     if (generateApfDoc && (!item.hasApf || forceRegenerate)) totalSteps++;
     if (generateSpecDoc && (!item.hasSpec || forceRegenerate)) totalSteps++;
+    if (generateSpecDocxDoc && (!item.hasSpecDocx || forceRegenerate)) totalSteps++;
   }
 
   send({ type: 'start', total: totalSteps, items: itemsToProcess.length, skipped });
@@ -496,6 +531,37 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
       } catch (err: any) {
         errors++;
         send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'SPEC', message: err.message });
+      }
+    }
+
+    // Generate Spec via novo pipeline (template Word) — só quando tipo=SPEC_DOCX.
+    // generateSpecCompleta já persiste DocumentosGerados + DocumentVersionHistory
+    // (incluindo o stamp de auditoria) internamente, então não repetimos esse bloco aqui.
+    if (generateSpecDocxDoc && (!item.hasSpecDocx || forceRegenerate)) {
+      current++;
+      const pct = Math.round((current / totalSteps) * 100);
+      send({ type: 'progress', current, total: totalSteps, pct, id: item.Id, step: 'SPEC_DOCX', title: item.Title });
+
+      try {
+        const t0 = Date.now();
+        await generateSpecCompleta(item.Id, interviewContext, auditUser);
+        const elapsed = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+        generated++;
+
+        send({
+          type: 'generated',
+          current, total: totalSteps, pct,
+          id: item.Id,
+          step: 'SPEC_DOCX',
+          title: item.Title,
+          elapsed,
+        });
+        const existing = results.find(r => r.id === item.Id);
+        if (existing) existing.spec = true;
+        else results.push({ id: item.Id, title: item.Title, spec: true });
+      } catch (err: any) {
+        errors++;
+        send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'SPEC_DOCX', message: err.message });
       }
     }
   }
@@ -738,6 +804,15 @@ router.get('/:id/versions/:versionId/download', async (req: Request, res: Respon
       const buf = await generateSpecPdf(wi, version.SpecContent);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="SPEC_${workItemId}_v${version.Versao}.pdf"`);
+      return res.send(buf);
+    }
+
+    if (version.Tipo === 'SPEC_DOCX') {
+      if (!version.EspecificacaoJson) return res.status(404).json({ error: 'Snapshot da especificação não disponível para esta versão' });
+      const spec = JSON.parse(version.EspecificacaoJson);
+      const buf = await generateSpecDocx(spec, { produto: wi.Modulo });
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('Content-Disposition', `attachment; filename="SPEC_${workItemId}_v${version.Versao}.docx"`);
       return res.send(buf);
     }
 

@@ -106,6 +106,21 @@ async function main() {
   if (!(ht11 > 15)) fail(`Linha com texto longo (ht=${ht11}) não escalou acima da altura mínima padrão (15).`);
   console.log(`✅ Altura de linha escala com o texto (linha longa=${ht11}, linha curta=${ht12}).`);
 
+  // ── 4. Colunas de valores (D..Q) ficam alinhadas ao meio (vertical=center) nas linhas 11-20 ──
+  const styles = await zip.file('xl/styles.xml')!.async('string');
+  const cellXfsBody = styles.match(/<cellXfs count="\d+">([\s\S]*?)<\/cellXfs>/)![1];
+  const xfs = cellXfsBody.split(/(?=<xf )/).filter(s => s.trim().length > 0);
+  const colunasAlinhadas = ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q'];
+  for (const col of colunasAlinhadas) {
+    for (const row of [11, 15, 20]) {
+      const m = sheet2.match(new RegExp(`<c r="${col}${row}" s="(\\d+)"`));
+      if (!m) fail(`Célula ${col}${row} não encontrada no sheet2 gerado.`);
+      const xf = xfs[parseInt(m![1])];
+      if (!xf || !/vertical="center"/.test(xf)) fail(`Coluna ${col} linha ${row} não está com vertical="center" (estilo s="${m![1]}").`);
+    }
+  }
+  console.log('✅ Colunas de valores (D..Q) alinhadas ao meio (vertical=center) nas linhas 11-20.');
+
   console.log('\n🎉 Todas as verificações passaram — template Excel sem regressão.');
   process.exit(0);
 }

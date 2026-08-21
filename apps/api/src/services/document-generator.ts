@@ -6,6 +6,9 @@ import { fileURLToPath } from 'url';
 import JSZip from 'jszip';
 import { buildContextoFinal } from '../utils/context.js';
 import { llmComplete, type LlmFinalidade } from './llm.js';
+import { estruturarDemanda, detectarLacunas, type SpecEstruturada, type LacunasResult } from './spec-structuring.js';
+import { revisarEspecificacao, type RevisaoResult } from './spec-review.js';
+import { generateSpecDocx } from './spec-docx-generator.js';
 import 'dotenv/config';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -527,6 +530,87 @@ Escreva em português brasileiro, de forma clara e objetiva. Use formatação co
     `);
 
   return { content, pdfBuffer };
+}
+
+// ─── Generate Business Spec (novo pipeline: Word template + estruturação + revisão) ───
+// Coexiste com generateSpec() (PDF simples, mantida sem alterações) — Tipo='SPEC_DOCX' é
+// um documento NOVO e independente, não substitui nem altera o fluxo 'SPEC' existente.
+// Pipeline: elicitação (já feita antes via streamInterview, chega aqui como extraContext) →
+// estruturação (LLM, JSON) → identificação de lacunas (determinístico) → revisão (LLM,
+// consultiva) → geração do documento (sem LLM, docxtemplater) → auditoria/versionamento.
+export async function generateSpecCompleta(
+  workItemId: number,
+  extraContext?: string,
+  auditUser?: { userId: string; name: string; email: string } | null,
+): Promise<{ spec: SpecEstruturada; docxBuffer: Buffer; lacunas: LacunasResult; revisao: RevisaoResult }> {
+  const pool = await getPool();
+
+  const wiResult = await pool.request()
+    .input('id', sql.Int, workItemId)
+    .query(`SELECT Id, Title, Description, ClienteNome, Modulo, DiscussionPati FROM WorkItems WHERE Id = @id`);
+  const wi = wiResult.recordset[0];
+  if (!wi) throw new Error('Work item não encontrado');
+  if (!wi.DiscussionPati && !extraContext && !wi.Description) throw new Error('Nenhum detalhamento encontrado para este item. O chamado precisa ter ao menos uma descrição.');
+
+  const contextoFinal = buildContextoFinal(wi.Description, wi.DiscussionPati, undefined);
+  const contextoAcumulado = await getContextoAcumulado(workItemId);
+  const contextoConsolidado = [contextoFinal, contextoAcumulado].filter(Boolean).join('\n\n');
+
+  const spec = await estruturarDemanda({
+    workItemId,
+    titulo: wi.Title,
+    cliente: wi.ClienteNome,
+    modulo: wi.Modulo,
+    contextoConsolidado,
+    interviewContext: extraContext,
+    autor: auditUser?.name || 'PATi',
+  });
+
+  const lacunas = detectarLacunas(spec);
+  if (lacunas.criticas.length > 0) {
+    throw new Error(`Não foi possível gerar a especificação — faltam informações essenciais: ${lacunas.criticas.join(' ')}`);
+  }
+
+  const revisao = await revisarEspecificacao(spec);
+
+  const docxBuffer = await generateSpecDocx(spec, { produto: wi.Modulo });
+
+  await pool.request()
+    .input('wiId', sql.Int, workItemId)
+    .input('tipo', sql.NVarChar(20), 'SPEC_DOCX')
+    .input('nome', sql.NVarChar(300), `SPEC_${workItemId}_${wi.ClienteNome || 'SRM'}.docx`)
+    .input('conteudo', sql.VarBinary(sql.MAX), docxBuffer)
+    .input('especificacao', sql.NVarChar(sql.MAX), JSON.stringify(spec))
+    .input('userId', sql.NVarChar(200), auditUser?.userId || null)
+    .input('userName', sql.NVarChar(200), auditUser?.name || null)
+    .input('userEmail', sql.NVarChar(200), auditUser?.email || null)
+    .input('interviewContext', sql.NVarChar(sql.MAX), extraContext || null)
+    .query(`
+      DELETE FROM DocumentosGerados WHERE WorkItemId = @wiId AND Tipo = @tipo;
+      INSERT INTO DocumentosGerados (WorkItemId, Tipo, NomeArquivo, Conteudo, EspecificacaoJson, GeradoPorUserId, GeradoPorNome, GeradoPorEmail, InterviewContext)
+      VALUES (@wiId, @tipo, @nome, @conteudo, @especificacao, @userId, @userName, @userEmail, @interviewContext);
+    `);
+
+  // Auditoria/versionamento — mesmo padrão já estabelecido pra APF (refineApf/generate/stream).
+  try {
+    const versao = await nextVersion(workItemId, 'SPEC_DOCX');
+    await pool.request()
+      .input('wid', sql.Int, workItemId)
+      .input('wtitle', sql.NVarChar(500), wi.Title)
+      .input('versao', sql.Int, versao)
+      .input('especificacao', sql.NVarChar(sql.MAX), JSON.stringify(spec))
+      .input('ctx', sql.NVarChar(sql.MAX), extraContext || null)
+      .input('uid', sql.NVarChar(200), auditUser?.userId || null)
+      .input('uname', sql.NVarChar(200), auditUser?.name || null)
+      .input('uemail', sql.NVarChar(200), auditUser?.email || null)
+      .query(`INSERT INTO DocumentVersionHistory
+        (WorkItemId, WorkItemTitle, Tipo, Versao, EspecificacaoJson, InterviewContext, GeradoPorUserId, GeradoPorNome, GeradoPorEmail)
+        VALUES (@wid, @wtitle, 'SPEC_DOCX', @versao, @especificacao, @ctx, @uid, @uname, @uemail)`);
+  } catch (auditErr: any) {
+    console.warn('⚠️  Audit save failed (non-blocking):', auditErr.message);
+  }
+
+  return { spec, docxBuffer, lacunas, revisao };
 }
 
 // ─── Refine APF via chat instruction ───
@@ -1095,12 +1179,47 @@ function estimateWrappedLines(text: string, charsPerLine: number): number {
   return Math.max(1, Math.ceil(text.length / charsPerLine));
 }
 
+// Clona entradas de cellXfs (styles.xml) adicionando vertical="center", preservando fonte/
+// preenchimento/borda/horizontal originais — usado para centralizar verticalmente colunas do
+// template que originalmente não tinham esse atributo (ficam "coladas" embaixo quando a altura
+// da linha cresce por texto longo em Processo/Observações). Retorna o XML atualizado + um mapa
+// styleOriginal -> novoIndex (novos estilos são anexados ao final de cellXfs).
+function cloneCellXfsWithVerticalCenter(stylesXml: string, sourceIndices: number[]): { stylesXml: string; indexMap: Record<number, number> } {
+  const section = stylesXml.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/);
+  if (!section) return { stylesXml, indexMap: {} };
+  const originalCount = parseInt(section[1]);
+  const body = section[2];
+  const parts = body.split(/(?=<xf )/).filter(s => s.trim().length > 0);
+  const indexMap: Record<number, number> = {};
+  const cloned: string[] = [];
+  sourceIndices.forEach((srcIdx, i) => {
+    const original = parts[srcIdx];
+    if (!original) return;
+    const withCenter = /<alignment[^>]*vertical="/.test(original)
+      ? original.replace(/vertical="[^"]*"/, 'vertical="center"')
+      : original.replace(/<alignment /, '<alignment vertical="center" ');
+    indexMap[srcIdx] = originalCount + cloned.length;
+    cloned.push(withCenter);
+  });
+  const newSection = `<cellXfs count="${originalCount + cloned.length}">${body}${cloned.join('')}</cellXfs>`;
+  return { stylesXml: stylesXml.replace(section[0], newSection), indexMap };
+}
+
 export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParametros): Promise<Buffer> {
-  // __dirname referencia o diretório do arquivo compilado (dist/services),
-  // então subimos 2 níveis para chegar em dist/ e depois entramos em templates/
+  // __dirname é dist/services (build) ou src/services (dev via tsx) — em ambos os casos
+  // subir 2 níveis chega na raiz do app (sibling de dist/src), onde templates/ deve existir
+  // (NÃO dentro de dist/templates — copy-assets copia lá também, mas esse caminho não é usado).
   const templatePath = resolve(__dirname, '../../templates', 'Modelo APF.xlsx');
   const templateBuf = readFileSync(templatePath);
   const zip = await JSZip.loadAsync(templateBuf);
+
+  // Estilos originais de D,E,F,G,H,I,J,K,L,M,N,O,P,Q não têm vertical="center" (ficam no rodapé
+  // da linha quando ela cresce por texto longo). Clonamos aqui, cedo, pra ter os novos índices
+  // disponíveis ao processar sheet2 mais abaixo; a seção de DXF (mais abaixo) reusa essa mesma
+  // variável `styles`, sem recarregar do zip.
+  let styles = await zip.file('xl/styles.xml')!.async('string');
+  const { stylesXml: stylesWithVCenter, indexMap: vCenter } = cloneCellXfsWithVerticalCenter(styles, [2, 83, 120, 71, 3, 81, 82, 84, 85]);
+  styles = stylesWithVCenter;
 
   // ─── Read shared strings to add new text values properly ───
   let sharedStringsXml = await zip.file('xl/sharedStrings.xml')!.async('string');
@@ -1178,20 +1297,33 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   });
 
   // Fix column D (Tipo) alignment: original styles 117/124 have numFmtId=4 (number format)
-  // which causes Excel to ignore horizontal alignment for text values.
-  // Style 2 (used by col E) has numFmtId=0 + center alignment and works correctly.
+  // which causes Excel to ignore horizontal alignment for text values. Style 2 (used by col E)
+  // has numFmtId=0 + center alignment and works correctly — usamos o clone com vertical=center.
   for (let r = 11; r <= 20; r++) {
-    sheet2 = sheet2.replace(new RegExp(`<c r="D${r}" s="\\d+"`), `<c r="D${r}" s="2"`);
+    sheet2 = sheet2.replace(new RegExp(`<c r="D${r}" s="\\d+"`), `<c r="D${r}" s="${vCenter[2]}"`);
   }
 
   // Normalize column B styles: original uses mix of 125/124/122/121/104 causing
-  // inconsistent appearance. Use style 104 (left, fontId=13 non-bold, wrapText) for all.
+  // inconsistent appearance. Use style 104 (left, fontId=13 non-bold, wrapText) for all
+  // (104 já tem vertical="center" no template original).
   for (let r = 11; r <= 20; r++) {
     sheet2 = sheet2.replace(new RegExp(`<c r="B${r}" s="\\d+"`), `<c r="B${r}" s="104"`);
   }
 
-  // Normalize column E row 20: uses style 106 instead of 118 (missing fill/color).
-  sheet2 = sheet2.replace(/<c r="E20" s="\d+"/, '<c r="E20" s="118"');
+  // Alinha ao meio (vertical=center) as demais colunas de valores da tabela (E=I/A/E,
+  // F=TD, G=AR/TR, H..Q=colunas calculadas por fórmula: Complex./PF/PFA/Total/Desenv./
+  // An.Teste/Teste) — no template original elas só tinham alinhamento horizontal, ficando
+  // "coladas" embaixo quando a linha cresce pro texto de Processo/Observações caber.
+  const colunasParaCentralizar: Record<string, number> = {
+    E: vCenter[2], F: vCenter[83], G: vCenter[120], H: vCenter[71],
+    I: vCenter[3], J: vCenter[3], K: vCenter[81], L: vCenter[82],
+    M: vCenter[84], N: vCenter[85], O: vCenter[85], P: vCenter[85], Q: vCenter[85],
+  };
+  for (const [col, styleId] of Object.entries(colunasParaCentralizar)) {
+    for (let r = 11; r <= 20; r++) {
+      sheet2 = sheet2.replace(new RegExp(`<c r="${col}${r}" s="\\d+"`), `<c r="${col}${r}" s="${styleId}"`);
+    }
+  }
 
   // Remove cached formula values in data rows to force recalculation
   // Matches formula cells like: <f>...</f><v>0</v> or <f .../>...<v>...</v>
@@ -1238,9 +1370,6 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   let wbRels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
   wbRels = wbRels.replace(/<Relationship[^>]*calcChain[^>]*\/>/, '');
   zip.file('xl/_rels/workbook.xml.rels', wbRels);
-
-  // Fix alignment in styles.xml
-  let styles = await zip.file('xl/styles.xml')!.async('string');
 
   // Fix DXF formats in table columns: add center alignment to Tipo (DXF 46), TD (DXF 44), AR/TR (DXF 43)
   // Must use positional replacement within <dxfs> section to avoid corrupting duplicate DXFs
@@ -1386,19 +1515,20 @@ export async function getDocument(workItemId: number, tipo: string): Promise<{ b
 }
 
 // ─── Check which items have documents ───
-export async function getDocumentStatus(workItemIds: number[]): Promise<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean }>> {
+export async function getDocumentStatus(workItemIds: number[]): Promise<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>> {
   if (workItemIds.length === 0) return {};
   const pool = await getPool();
   const idList = workItemIds.join(',');
   const result = await pool.request()
     .query(`SELECT WorkItemId, Tipo FROM DocumentosGerados WHERE WorkItemId IN (${idList})`);
 
-  const status: Record<number, { apf: boolean; apfExcel: boolean; spec: boolean }> = {};
+  const status: Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }> = {};
   for (const row of result.recordset) {
-    if (!status[row.WorkItemId]) status[row.WorkItemId] = { apf: false, apfExcel: false, spec: false };
+    if (!status[row.WorkItemId]) status[row.WorkItemId] = { apf: false, apfExcel: false, spec: false, specDocx: false };
     if (row.Tipo === 'APF') status[row.WorkItemId].apf = true;
     if (row.Tipo === 'APF_EXCEL') status[row.WorkItemId].apfExcel = true;
     if (row.Tipo === 'SPEC') status[row.WorkItemId].spec = true;
+    if (row.Tipo === 'SPEC_DOCX') status[row.WorkItemId].specDocx = true;
   }
   return status;
 }

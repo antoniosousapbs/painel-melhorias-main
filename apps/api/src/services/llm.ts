@@ -3,7 +3,7 @@ import { encryptSecret, decryptSecret, maskSecret } from '../utils/crypto.js';
 import 'dotenv/config';
 
 export type LlmKind = 'openai-compatible' | 'azure-ai-foundry';
-export type LlmFinalidade = 'chat' | 'classificacao' | 'apf_geracao' | 'apf_refinamento' | 'spec_geracao';
+export type LlmFinalidade = 'chat' | 'classificacao' | 'apf_geracao' | 'apf_refinamento' | 'spec_geracao' | 'spec_estruturacao' | 'spec_revisao';
 
 export interface LlmProvider {
   Id: number;
@@ -215,16 +215,27 @@ const REASONING_MIN_TOKENS: Record<LlmFinalidade, number> = {
   apf_geracao: 6000,
   apf_refinamento: 6000,
   spec_geracao: 6000,
+  // 'high' reasoning_effort (ver REASONING_EFFORT) consome MUITO mais tokens "invisíveis"
+  // de raciocínio dentro do mesmo orçamento — 6000 (suficiente em 'medium') fazia o modelo
+  // gastar tudo em raciocínio e devolver resposta vazia (JSON.parse: "Unexpected end of
+  // JSON input"), regressão real detectada ao gerar a especificação do chamado #326204.
+  spec_estruturacao: 16000,
+  spec_revisao: 4000,
 };
 
 // Efforts baixos priorizam latência (entrevista interativa, chat); geração/refinamento de
-// APF usa esforço médio — ponto de partida balanceado recomendado pela própria Microsoft.
-const REASONING_EFFORT: Record<LlmFinalidade, 'low' | 'medium'> = {
+// APF e estruturação da Especificação usam esforço médio — 'high' foi testado em produção
+// pro spec_estruturacao e chegou a estourar 150s de timeout no GPT-5.4 (chamado #326204);
+// revertido pra 'medium' por confiabilidade. A riqueza de conteúdo adicional é buscada via
+// instruções de prompt (ver prompts/spec/estruturacao.ts), não via esforço de raciocínio.
+const REASONING_EFFORT: Record<LlmFinalidade, 'low' | 'medium' | 'high'> = {
   chat: 'low',
   classificacao: 'low',
   apf_geracao: 'medium',
   apf_refinamento: 'medium',
   spec_geracao: 'medium',
+  spec_estruturacao: 'medium',
+  spec_revisao: 'low',
 };
 
 // Timeout por finalidade — evita que uma chamada travada segure a conexão além do timeout
@@ -237,6 +248,8 @@ const TIMEOUT_MS: Record<LlmFinalidade, number> = {
   apf_geracao: 90_000,
   apf_refinamento: 90_000,
   spec_geracao: 90_000,
+  spec_estruturacao: 150_000, // 'high' reasoning_effort custa mais tempo de parede que 'medium'
+  spec_revisao: 60_000,
 };
 
 function buildRequestBody(
@@ -438,7 +451,8 @@ export async function ensureSeedProviders(): Promise<void> {
 
   const groqUrl = process.env.CHAT_API_URL;
   const groqKey = process.env.CHAT_API_KEY;
-  const groqModel = process.env.CHAT_MODEL || 'llama-3.3-70b-versatile';
+  // llama-3.3-70b-versatile foi deprecado pela Groq em 16/08/2026 — substituto recomendado: gpt-oss-120b
+  const groqModel = process.env.CHAT_MODEL || 'openai/gpt-oss-120b';
   let groqId: number | null = null;
   if (groqUrl && groqKey) {
     await addProvider({ nome: 'Groq Llama 3.3', kind: 'openai-compatible', apiUrl: groqUrl, apiKey: groqKey, modelName: groqModel });
@@ -476,9 +490,13 @@ export async function ensureSeedProviders(): Promise<void> {
     await setUsoConfig('apf_geracao', gpt54Id, groqId);
     await setUsoConfig('apf_refinamento', gpt54Id, groqId);
     await setUsoConfig('spec_geracao', gpt54Id, groqId);
+    await setUsoConfig('spec_estruturacao', gpt54Id, groqId);
+    await setUsoConfig('spec_revisao', gpt54Id, groqId);
   } else if (groqId) {
     await setUsoConfig('apf_geracao', groqId, null);
     await setUsoConfig('apf_refinamento', groqId, null);
     await setUsoConfig('spec_geracao', groqId, null);
+    await setUsoConfig('spec_estruturacao', groqId, null);
+    await setUsoConfig('spec_revisao', groqId, null);
   }
 }

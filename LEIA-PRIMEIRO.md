@@ -95,7 +95,7 @@ DEVOPS_PROJECT=SRM.wbc7srm
 # LLM
 CHAT_API_URL=https://api.groq.com/openai/v1/chat/completions
 CHAT_API_KEY=SUA_CHAVE_GROQ_AQUI
-CHAT_MODEL=llama-3.3-70b-versatile
+CHAT_MODEL=openai/gpt-oss-120b
 
 # JWT
 JWT_SECRET="GERE_UM_SEGREDO_FORTE_AQUI"
