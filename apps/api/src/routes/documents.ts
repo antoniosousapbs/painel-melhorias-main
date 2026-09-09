@@ -6,7 +6,8 @@ import { generateSpecDocx } from '../services/spec-docx-generator.js';
 import { getWorkItem, getProjectFilter } from '../services/workitem.js';
 import { interviewHistoryToText } from '../utils/context.js';
 import { requireRole } from '../middleware/auth.js';
-import jwt from 'jsonwebtoken';
+import { logAudit } from '../utils/audit.js';
+import { tryExtractUser } from '../utils/auth-user.js';
 
 const router = Router();
 
@@ -25,6 +26,7 @@ router.post('/:id/generate-apf', async (req, res) => {
     res.json({ totalPF: result.apf.totalPF, totalPFA: result.apf.totalPFA, totalHoras: result.apf.totalHoras, elementos: result.apf.elementos.length });
   } catch (err: any) {
     console.error('APF generation error:', err.message);
+    logAudit({ eventType: 'ERRO', user: tryExtractUser(req.headers.authorization), workItemId: parseInt(req.params.id) || null, detalhe: `generate-apf: ${err.message}`, sucesso: false });
     res.status(500).json({ error: err.message });
   }
 });
@@ -43,6 +45,7 @@ router.post('/:id/generate-spec', async (req, res) => {
     res.json({ success: true, length: result.content.length });
   } catch (err: any) {
     console.error('Spec generation error:', err.message);
+    logAudit({ eventType: 'ERRO', user: tryExtractUser(req.headers.authorization), workItemId: parseInt(req.params.id) || null, detalhe: `generate-spec: ${err.message}`, sucesso: false });
     res.status(500).json({ error: err.message });
   }
 });
@@ -68,6 +71,7 @@ router.post('/:id/generate-spec-docx', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Spec docx generation error:', err.message);
+    logAudit({ eventType: 'ERRO', user: tryExtractUser(req.headers.authorization), workItemId: parseInt(req.params.id) || null, detalhe: `generate-spec-docx: ${err.message}`, sucesso: false });
     res.status(500).json({ error: err.message });
   }
 });
@@ -95,6 +99,7 @@ router.post('/:id/refine-apf', async (req, res) => {
     });
   } catch (err: any) {
     console.error('APF refinement error:', err.message);
+    logAudit({ eventType: 'ERRO', user: tryExtractUser(req.headers.authorization), workItemId: parseInt(req.params.id) || null, detalhe: `refine-apf: ${err.message}`, sucesso: false });
     res.status(500).json({ error: err.message });
   }
 });
@@ -466,6 +471,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
       } catch (err: any) {
         errors++;
         send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'APF', message: err.message });
+        logAudit({ eventType: 'ERRO', user: auditUser, workItemId: item.Id, detalhe: `generate-batch APF: ${err.message}`, sucesso: false });
         const existing = results.find(r => r.id === item.Id);
         if (existing) existing.error = err.message;
         else results.push({ id: item.Id, title: item.Title, error: err.message });
@@ -531,6 +537,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
       } catch (err: any) {
         errors++;
         send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'SPEC', message: err.message });
+        logAudit({ eventType: 'ERRO', user: auditUser, workItemId: item.Id, detalhe: `generate-batch SPEC: ${err.message}`, sucesso: false });
       }
     }
 
@@ -562,6 +569,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
       } catch (err: any) {
         errors++;
         send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'SPEC_DOCX', message: err.message });
+        logAudit({ eventType: 'ERRO', user: auditUser, workItemId: item.Id, detalhe: `generate-batch SPEC_DOCX: ${err.message}`, sucesso: false });
       }
     }
   }
@@ -589,19 +597,6 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
   res.end();
 });
 
-/** Safely decode JWT (no signature verification) to extract audit user info. */
-function tryExtractUser(authHeader?: string): { userId: string; name: string; email: string } | null {
-  if (!authHeader?.startsWith('Bearer ')) return null;
-  try {
-    const decoded = jwt.decode(authHeader.slice(7)) as any;
-    if (!decoded) return null;
-    return {
-      userId: decoded.oid || decoded.sub || '',
-      name: decoded.name || decoded.unique_name || '',
-      email: decoded.preferred_username || decoded.upn || decoded.email || '',
-    };
-  } catch { return null; }
-}
 
 // ─── Interview Sessions (conflict detection) ──────────────────────────────────
 

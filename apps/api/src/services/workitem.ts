@@ -60,6 +60,9 @@ export interface WorkItemFilters {
   responsavel?: string;
   apf?: 'com' | 'sem';
   search?: string;
+  /** true = só chamados ENCERRADOS (DevOpsState='Closed'), usado pela aba Histórico.
+   * Ausente/false = comportamento padrão do Dashboard (exclui Closed e Canceled). */
+  encerrados?: boolean;
 }
 
 export interface WorkItemUpdate {
@@ -72,6 +75,7 @@ export interface WorkItemUpdate {
   apfDispensado?: boolean;
   apfDispensadoMotivo?: string;
   revisadoPor?: string;
+  revisadoPorEmail?: string;
 }
 
 export async function getNextPriority(cliente: string, operatorProjects?: string[] | null) {
@@ -106,7 +110,15 @@ export async function listWorkItems(filters: WorkItemFilters, operatorProjects?:
   const offset = (page - 1) * size;
 
   const pf = await getProjectFilter('AND', operatorProjects);
-  let where = `WHERE DevOpsState <> 'Canceled' ${pf.clause}`;
+  // Chamados encerrados (Closed) ficam no banco (histórico), mas só aparecem na aba
+  // Histórico — o Dashboard/KPIs/gráficos padrão continuam mostrando só backlog ativo.
+  // No Histórico, só faz sentido listar chamados que tiveram uma contagem de APF real
+  // (é o objetivo declarado da tela — Esforço APF sempre deve vir preenchido aqui;
+  // um chamado fechado com só uma Especificação gerada, sem APF, não pertence a esta
+  // lista, senão a coluna Esforço aparece vazia pra parte dos registros).
+  let where = filters.encerrados
+    ? `WHERE DevOpsState = 'Closed' AND EXISTS (SELECT 1 FROM DocumentVersionHistory dvh WHERE dvh.WorkItemId = WorkItems.Id AND dvh.Tipo = 'APF') ${pf.clause}`
+    : `WHERE DevOpsState NOT IN ('Canceled', 'Closed') ${pf.clause}`;
   const request = pool.request();
   pf.bind(request);
 
@@ -335,7 +347,7 @@ export async function updateWorkItem(id: number, data: WorkItemUpdate) {
       sets.push('ApfDispensadoMotivo = @apfDispensadoMotivo');
       request.input('apfDispensadoMotivo', sql.NVarChar(500), data.apfDispensadoMotivo || null);
       sets.push('ApfDispensadoPor = @apfDispensadoPor');
-      request.input('apfDispensadoPor', sql.NVarChar(100), data.revisadoPor || 'admin');
+      request.input('apfDispensadoPor', sql.NVarChar(100), data.revisadoPor || 'PATi');
       sets.push('ApfDispensadoEm = @apfDispensadoEm');
       request.input('apfDispensadoEm', sql.DateTime2, new Date());
     } else {
@@ -351,7 +363,7 @@ export async function updateWorkItem(id: number, data: WorkItemUpdate) {
   sets.push('ClassificacaoRevisadaPor = @revisadoPor');
   sets.push('ClassificacaoRevisadaEm = @now');
   sets.push('AtualizadoEm = @now');
-  request.input('revisadoPor', sql.NVarChar(100), data.revisadoPor || 'admin');
+  request.input('revisadoPor', sql.NVarChar(100), data.revisadoPor || 'PATi');
   request.input('now', sql.DateTime2, new Date());
 
   await request.query(`UPDATE WorkItems SET ${sets.join(', ')} WHERE Id = @id`);
@@ -363,10 +375,11 @@ export async function updateWorkItem(id: number, data: WorkItemUpdate) {
       .input('campo', sql.NVarChar(50), entry.campo)
       .input('anterior', sql.NVarChar(500), entry.anterior)
       .input('novo', sql.NVarChar(500), entry.novo)
-      .input('por', sql.NVarChar(100), data.revisadoPor || 'admin')
+      .input('por', sql.NVarChar(100), data.revisadoPor || 'PATi')
+      .input('porEmail', sql.NVarChar(200), data.revisadoPorEmail || null)
       .query(`
-        INSERT INTO WorkItemAuditLog (WorkItemId, Campo, ValorAnterior, ValorNovo, AlteradoPor)
-        VALUES (@workItemId, @campo, @anterior, @novo, @por)
+        INSERT INTO WorkItemAuditLog (WorkItemId, Campo, ValorAnterior, ValorNovo, AlteradoPor, AlteradoPorEmail)
+        VALUES (@workItemId, @campo, @anterior, @novo, @por, @porEmail)
       `);
   }
 
@@ -381,7 +394,7 @@ export async function getKpis(
   const request = pool.request();
   const pf = await getProjectFilter('AND', operatorProjects);
 
-  let where = `WHERE DevOpsState <> 'Canceled' ${pf.clause}`;
+  let where = `WHERE DevOpsState NOT IN ('Canceled', 'Closed') ${pf.clause}`;
   pf.bind(request);
   if (filters?.cliente) {
     where += ' AND ClienteNome LIKE @cliente';
@@ -481,7 +494,7 @@ export async function getChartData(filters?: { cliente?: string; categoria?: str
     const tag = paramIdx++;
     const r = pool.request();
     pf.bind(r);
-    let where = `WHERE DevOpsState <> 'Canceled' ${pf.clause || ''}`;
+    let where = `WHERE DevOpsState NOT IN ('Canceled', 'Closed') ${pf.clause || ''}`;
     if (filters?.cliente) {
       where += ` AND ClienteNome LIKE @cliente${tag}`;
       r.input(`cliente${tag}`, sql.NVarChar, `%${filters.cliente}%`);
@@ -610,20 +623,27 @@ export async function getChartData(filters?: { cliente?: string; categoria?: str
   };
 }
 
-export async function getFilterOptions(operatorProjects?: string[] | null) {
+export async function getFilterOptions(operatorProjects?: string[] | null, encerrados?: boolean) {
   const pool = await getPool();
   const pf = await getProjectFilter('AND', operatorProjects);
+
+  // Mesmo recorte usado em listWorkItems: por padrão só backlog ativo (nunca Canceled/Closed);
+  // no modo "encerrados" (aba Histórico), só chamados fechados com uma contagem de APF real —
+  // sem isso, os combos de filtro traziam valores de chamados sem Esforço APF preenchido.
+  const stateFilter = encerrados
+    ? `DevOpsState = 'Closed' AND EXISTS (SELECT 1 FROM DocumentVersionHistory dvh WHERE dvh.WorkItemId = WorkItems.Id AND dvh.Tipo = 'APF')`
+    : `DevOpsState NOT IN ('Canceled', 'Closed')`;
 
   const mkReq = () => { const r = pool.request(); pf.bind(r); return r; };
 
   const [categorias, modulos, prioridades, estados, clientes, caseTypes, responsaveis] = await Promise.all([
-    mkReq().query(`SELECT DISTINCT Categoria FROM WorkItems WHERE Categoria IS NOT NULL ${pf.clause} ORDER BY Categoria`),
-    mkReq().query(`SELECT DISTINCT Modulo FROM WorkItems WHERE Modulo IS NOT NULL AND Modulo != '' ${pf.clause} ORDER BY Modulo`),
-    mkReq().query(`SELECT DISTINCT Prioridade FROM WorkItems WHERE Prioridade IS NOT NULL ${pf.clause} ORDER BY Prioridade`),
-    mkReq().query(`SELECT DISTINCT SupportCaseStatus FROM WorkItems WHERE SupportCaseStatus IS NOT NULL AND SupportCaseStatus != '' ${pf.clause} ORDER BY SupportCaseStatus`),
-    mkReq().query(`SELECT DISTINCT ClienteNome FROM WorkItems WHERE ClienteNome IS NOT NULL AND ClienteNome != '' ${pf.clause} ORDER BY ClienteNome`),
-    mkReq().query(`SELECT DISTINCT SupportCaseType FROM WorkItems WHERE SupportCaseType IS NOT NULL AND SupportCaseType != '' ${pf.clause} ORDER BY SupportCaseType`),
-    mkReq().query(`SELECT DISTINCT AssignedTo FROM WorkItems WHERE AssignedTo IS NOT NULL AND AssignedTo != '' ${pf.clause} ORDER BY AssignedTo`),
+    mkReq().query(`SELECT DISTINCT Categoria FROM WorkItems WHERE ${stateFilter} AND Categoria IS NOT NULL ${pf.clause} ORDER BY Categoria`),
+    mkReq().query(`SELECT DISTINCT Modulo FROM WorkItems WHERE ${stateFilter} AND Modulo IS NOT NULL AND Modulo != '' ${pf.clause} ORDER BY Modulo`),
+    mkReq().query(`SELECT DISTINCT Prioridade FROM WorkItems WHERE ${stateFilter} AND Prioridade IS NOT NULL ${pf.clause} ORDER BY Prioridade`),
+    mkReq().query(`SELECT DISTINCT SupportCaseStatus FROM WorkItems WHERE ${stateFilter} AND SupportCaseStatus IS NOT NULL AND SupportCaseStatus != '' ${pf.clause} ORDER BY SupportCaseStatus`),
+    mkReq().query(`SELECT DISTINCT ClienteNome FROM WorkItems WHERE ${stateFilter} AND ClienteNome IS NOT NULL AND ClienteNome != '' ${pf.clause} ORDER BY ClienteNome`),
+    mkReq().query(`SELECT DISTINCT SupportCaseType FROM WorkItems WHERE ${stateFilter} AND SupportCaseType IS NOT NULL AND SupportCaseType != '' ${pf.clause} ORDER BY SupportCaseType`),
+    mkReq().query(`SELECT DISTINCT AssignedTo FROM WorkItems WHERE ${stateFilter} AND AssignedTo IS NOT NULL AND AssignedTo != '' ${pf.clause} ORDER BY AssignedTo`),
   ]);
 
   return {

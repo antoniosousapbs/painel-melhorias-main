@@ -45,12 +45,14 @@ const FAKE_SPEC: SpecEstruturada = {
   requisitosFuncionais: [
     {
       id: 'F-001', titulo: 'Requisito de Teste Um', prioridade: 'Must Have',
+      entrada: 'Identificador do chamado, tipo numérico (obrigatório).',
       descricao: 'Descrição sintética do requisito um.', regraPrincipal: 'Regra principal um.', beneficio: 'Benefício um.',
       origem: 'CONFIRMADO', regrasRelacionadas: ['RN-001'],
       criteriosAceite: [{ dado: 'um contexto', quando: 'uma ação ocorre', entao: 'um resultado esperado acontece' }],
     },
     {
       id: 'F-002', titulo: 'Requisito de Teste Dois', prioridade: 'Should Have',
+      entrada: '',
       descricao: 'Descrição sintética do requisito dois.', regraPrincipal: 'Regra principal dois.', beneficio: 'Benefício dois.',
       origem: 'INFERIDO', regrasRelacionadas: [],
       criteriosAceite: [],

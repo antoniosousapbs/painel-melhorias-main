@@ -240,8 +240,14 @@ async function getDiretrizForProject(devOpsAreaPath: string | null | undefined):
  * Consolida todo o contexto de entrevista/refinamento já coletado para um chamado —
  * geração original + cada ajuste/refinamento posterior — para que uma nova entrevista ou
  * um novo refinamento não force o analista a repetir informações já fornecidas antes.
+ *
+ * Prioriza as entrevistas MAIS RECENTES (não as mais antigas) quando o total excede o
+ * orçamento de caracteres — o contrário de um `.slice(0, n)` simples, que cortaria
+ * justamente as respostas mais novas (normalmente as mais atualizadas/confirmadas) por
+ * estarem no fim da lista cronológica. Ver bug real: entrevista re-perguntando o "novo
+ * aprovador" que já constava numa entrevista anterior, descartada pelo corte antigo.
  */
-export async function getContextoAcumulado(workItemId: number): Promise<string> {
+export async function getContextoAcumulado(workItemId: number, maxChars = 8000): Promise<string> {
   const pool = await getPool();
   const history = await pool.request()
     .input('wid', sql.Int, workItemId)
@@ -249,28 +255,39 @@ export async function getContextoAcumulado(workItemId: number): Promise<string> 
       SELECT Tipo, Versao, InterviewContext, CriadoEm
       FROM DocumentVersionHistory
       WHERE WorkItemId = @wid AND InterviewContext IS NOT NULL AND LEN(InterviewContext) > 0
-      ORDER BY CriadoEm ASC
+      ORDER BY CriadoEm DESC
     `);
 
   const seen = new Set<string>();
-  const blocks: string[] = [];
+  const blocksDesc: string[] = [];
   for (const row of history.recordset) {
     const ctx = (row.InterviewContext as string || '').trim();
     if (!ctx || seen.has(ctx)) continue;
     seen.add(ctx);
-    blocks.push(`--- Entrevista/ajuste anterior (${row.Tipo} v${row.Versao}) ---\n${ctx}`);
+    blocksDesc.push(`--- Entrevista/ajuste anterior (${row.Tipo} v${row.Versao}) ---\n${ctx}`);
   }
 
   // Fallback: chamados gerados antes de existir o versionamento, ou refinados fora do fluxo de interview
-  if (blocks.length === 0) {
+  if (blocksDesc.length === 0) {
     const current = await pool.request()
       .input('wid', sql.Int, workItemId)
       .query(`SELECT TOP 1 InterviewContext FROM DocumentosGerados WHERE WorkItemId = @wid AND InterviewContext IS NOT NULL AND LEN(InterviewContext) > 0`);
     const ctx = (current.recordset[0]?.InterviewContext || '').trim();
-    if (ctx) blocks.push(`--- Contexto da última geração ---\n${ctx}`);
+    if (ctx) blocksDesc.push(`--- Contexto da última geração ---\n${ctx}`);
   }
 
-  return blocks.join('\n\n');
+  // Mantém blocos inteiros a partir do MAIS RECENTE (blocksDesc[0]) até estourar o orçamento —
+  // sempre inclui ao menos o mais recente, mesmo que ele sozinho já exceda o limite.
+  const kept: string[] = [];
+  let total = 0;
+  for (const block of blocksDesc) {
+    if (total + block.length > maxChars && kept.length > 0) break;
+    kept.push(block);
+    total += block.length;
+  }
+
+  // Reordena de volta pra ordem cronológica (mais antigo → mais recente) pra leitura natural.
+  return kept.reverse().join('\n\n');
 }
 
 // ─── Call LLM for APF analysis (cloud or Ollama) ───
@@ -563,7 +580,7 @@ export async function generateSpecCompleta(
     modulo: wi.Modulo,
     contextoConsolidado,
     interviewContext: extraContext,
-    autor: auditUser?.name || 'PATi',
+    autor: auditUser?.name || 'Equipe Paradigma',
   });
 
   const lacunas = detectarLacunas(spec);
@@ -572,6 +589,18 @@ export async function generateSpecCompleta(
   }
 
   const revisao = await revisarEspecificacao(spec);
+
+  // Número real da versão (mesma contagem sequencial usada em DocumentVersionHistory/Auditoria)
+  // PRECISA ser calculado ANTES de renderizar o docx — senão o documento sai sempre com o
+  // "1.0" fixo que estruturarDemanda() usa como placeholder (bug real: a versão dentro do
+  // texto do documento nunca acompanhava a versão real mostrada na Auditoria).
+  const versao = await nextVersion(workItemId, 'SPEC_DOCX');
+  const dataHoje = new Date().toLocaleDateString('pt-BR');
+  if (spec.versionamento.length > 0) {
+    const ultima = spec.versionamento[spec.versionamento.length - 1];
+    ultima.versao = `${versao}.0`;
+    ultima.data = dataHoje;
+  }
 
   const docxBuffer = await generateSpecDocx(spec, { produto: wi.Modulo });
 
@@ -593,7 +622,6 @@ export async function generateSpecCompleta(
 
   // Auditoria/versionamento — mesmo padrão já estabelecido pra APF (refineApf/generate/stream).
   try {
-    const versao = await nextVersion(workItemId, 'SPEC_DOCX');
     await pool.request()
       .input('wid', sql.Int, workItemId)
       .input('wtitle', sql.NVarChar(500), wi.Title)

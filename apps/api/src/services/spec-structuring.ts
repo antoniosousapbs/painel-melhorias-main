@@ -11,6 +11,7 @@ export interface RequisitoFuncional {
   id: string; // "F-001"
   titulo: string;
   prioridade: 'Must Have' | 'Should Have' | 'Could Have';
+  entrada: string; // parâmetro(s) de entrada do método/endpoint (obrigatório/opcional, tipo de dado)
   descricao: string;
   regraPrincipal: string;
   beneficio: string;
@@ -69,6 +70,51 @@ function normalizeEscopoItems(raw: any): EscopoItem[] {
   return raw.map((r: any) => typeof r === 'string' ? { item: r, justificativa: '' } : { item: r.item || '', justificativa: r.justificativa || '' });
 }
 
+interface ExclusaoObrigatoria { keywords: string[]; item: string; justificativa: string }
+
+// Cláusulas de proteção que TODA especificação deve conter, independente do que a LLM
+// produziu — garante a cobertura mesmo se o modelo esquecer/ignorar a instrução do prompt.
+const EXCLUSOES_OBRIGATORIAS: ExclusaoObrigatoria[] = [
+  {
+    keywords: ['retroativ', 'já existentes', 'dados existentes', 'instâncias existentes', 'registros existentes'],
+    item: 'Tratamento retroativo de registros, instâncias ou dados já existentes',
+    justificativa: 'Quaisquer registros criados antes da publicação desta entrega não são objeto desta especificação e não serão reprocessados, corrigidos ou migrados no âmbito deste escopo.',
+  },
+  {
+    keywords: ['nova tela', 'novo campo', 'novo componente', 'telas ou campos', 'campos ou componentes'],
+    item: 'Criação de telas, campos ou componentes não descritos nesta especificação',
+    justificativa: 'A solução utiliza os elementos de interface já descritos nesta especificação — novos elementos de UI são tratados como escopo adicional.',
+  },
+  {
+    keywords: ['relatório', 'relatorio', 'consulta', 'exportaç', 'exportacao'],
+    item: 'Alterações em relatórios, consultas ou exportações não mencionadas',
+    justificativa: 'Relatórios e consultas não citados nesta especificação permanecem inalterados nesta entrega.',
+  },
+  {
+    keywords: ['integraç', 'integracao', 'sistema externo', 'api externa', 'terceiro'],
+    item: 'Integrações com sistemas externos não descritas nesta especificação',
+    justificativa: 'Integrações não detalhadas nesta especificação estão fora do âmbito desta entrega.',
+  },
+  {
+    keywords: ['não detalhad', 'nao detalhad', 'fora do descrito'],
+    item: 'Funcionalidades ou comportamentos não detalhados na seção "Dentro do Escopo"',
+    justificativa: 'Apenas os itens listados em "Dentro do Escopo" fazem parte desta entrega.',
+  },
+];
+
+/** Garante que as 5 exclusões padrão (retroativo, telas/campos, relatórios, integrações,
+ * não detalhado) estejam sempre presentes no "Fora do Escopo" — só acrescenta as que ainda
+ * não estão cobertas (checagem por palavra-chave), nunca duplica o que a LLM já escreveu. */
+function ensureExclusoesObrigatorias(excluido: EscopoItem[]): EscopoItem[] {
+  const haystack = excluido.map(e => `${e.item} ${e.justificativa}`.toLowerCase()).join(' | ');
+  const resultado = [...excluido];
+  for (const regra of EXCLUSOES_OBRIGATORIAS) {
+    const jaCoberto = regra.keywords.some(k => haystack.includes(k));
+    if (!jaCoberto) resultado.push({ item: regra.item, justificativa: regra.justificativa });
+  }
+  return resultado;
+}
+
 /**
  * Etapa 2 do pipeline (Estruturação): transforma a demanda + contexto acumulado + entrevista
  * numa representação estruturada (SpecEstruturada). Não gera o documento (isso é
@@ -104,6 +150,7 @@ export async function estruturarDemanda(params: {
     id: `F-${String(i + 1).padStart(3, '0')}`,
     titulo: r.titulo || '',
     prioridade: r.prioridade || 'Should Have',
+    entrada: r.entrada || '',
     descricao: r.descricao || '',
     regraPrincipal: r.regraPrincipal || '',
     beneficio: r.beneficio || '',
@@ -130,7 +177,7 @@ export async function estruturarDemanda(params: {
     problemaAtual: parsed.problemaAtual || [],
     beneficiosEsperados: parsed.beneficiosEsperados || [],
     stakeholders: parsed.stakeholders || [],
-    escopo: { incluido: normalizeEscopoItems(parsed.escopo?.incluido), excluido: normalizeEscopoItems(parsed.escopo?.excluido) },
+    escopo: { incluido: normalizeEscopoItems(parsed.escopo?.incluido), excluido: ensureExclusoesObrigatorias(normalizeEscopoItems(parsed.escopo?.excluido)) },
     premissas: parsed.premissas || [],
     restricoes: parsed.restricoes || [],
     processoAtual: { fluxoResumido: parsed.processoAtual?.fluxoResumido || [], gargalosRiscos: parsed.processoAtual?.gargalosRiscos || [] },
@@ -141,8 +188,8 @@ export async function estruturarDemanda(params: {
     matrizRiscos: parsed.matrizRiscos || [],
     glossario: parsed.glossario || [],
     pendencias: parsed.pendencias || [],
-    versionamento: [{ versao: '1.0', data: dataHoje, autor: params.autor, descricao: 'Geração inicial via PATi.' }],
-    historicoAlteracoes: [{ area: 'Geração', alteracao: 'Especificação gerada automaticamente pela PATi.' }],
+    versionamento: [{ versao: '1.0', data: dataHoje, autor: params.autor, descricao: 'Elaboração inicial da especificação.' }],
+    historicoAlteracoes: [{ area: 'Elaboração', alteracao: 'Especificação elaborada com base nas informações coletadas junto ao cliente.' }],
   };
 }
 
@@ -172,9 +219,21 @@ export function detectarLacunas(spec: SpecEstruturada): LacunasResult {
   }
   for (const req of spec.requisitosFuncionais) {
     if (req.criteriosAceite.length === 0) avisos.push(`Requisito ${req.id} (${req.titulo}) não tem critérios de aceite.`);
+    if (!req.entrada?.trim()) avisos.push(`Requisito ${req.id} (${req.titulo}) não tem parâmetro de entrada especificado.`);
     if (req.origem === 'PENDENTE_DE_DEFINICAO') avisos.push(`Requisito ${req.id} (${req.titulo}) está marcado como pendente de definição.`);
     for (const regraId of req.regrasRelacionadas) {
       if (!regraIds.has(regraId)) avisos.push(`Requisito ${req.id} referencia a regra ${regraId}, que não existe na lista de regras de negócio.`);
+    }
+  }
+
+  // Mitigação de risco que soa como decisão AINDA PENDENTE ("confirmar com o cliente...",
+  // "definir com o negócio se...") nunca deveria ir pro documento final, principalmente em
+  // riscos de probabilidade Média/Alta — sinaliza pro analista resolver antes de enviar.
+  const PADRAO_DECISAO_PENDENTE = /\b(confirmar com|definir com|a definir|a confirmar|pendente de defini|validar com o cliente se|decidir se)\b/i;
+  for (const risco of spec.matrizRiscos) {
+    const provavelAltaOuMedia = risco.probabilidade === 'Média' || risco.probabilidade === 'Alta';
+    if (provavelAltaOuMedia && PADRAO_DECISAO_PENDENTE.test(risco.mitigacao || '')) {
+      avisos.push(`Risco "${risco.risco}" (probabilidade ${risco.probabilidade}) tem mitigação que soa como decisão ainda pendente ("${risco.mitigacao}") — resolva e documente a decisão tomada antes de enviar ao cliente.`);
     }
   }
 

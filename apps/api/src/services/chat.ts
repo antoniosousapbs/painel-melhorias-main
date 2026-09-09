@@ -2,6 +2,7 @@ import { getPool, sql } from '../db/connection.js';
 import { getProjectFilter } from './workitem.js';
 import { llmStream } from './llm.js';
 import { getContextoAcumulado, getApfElementsSummary } from './document-generator.js';
+import { keepMostRecentBlocks } from '../utils/context.js';
 import 'dotenv/config';
 
 // ── Cache for data context (avoids re-querying SQL on every message) ──
@@ -231,7 +232,10 @@ export async function queryForQuestion(
           detail += `Descrição: Não disponível\n`;
         }
         if (wi.DiscussionPati) {
-          detail += `\nTag [PATI] presente: SIM\nComentários [PATI] (refinamentos registrados no DevOps):\n${wi.DiscussionPati.slice(0, 1000)}${wi.DiscussionPati.length > 1000 ? '...(truncado)' : ''}\n`;
+          // Mantém os comentários [PATI] MAIS RECENTES (não os mais antigos) quando o total
+          // excede o orçamento — são os que costumam trazer a resposta final/confirmada.
+          const patiRecente = keepMostRecentBlocks(wi.DiscussionPati, '\n\n---\n\n', 1500);
+          detail += `\nTag [PATI] presente: SIM\nComentários [PATI] (refinamentos registrados no DevOps):\n${patiRecente}${patiRecente.length < wi.DiscussionPati.length ? '...(comentários mais antigos omitidos)' : ''}\n`;
         } else {
           detail += `\nTag [PATI] presente: NÃO (nenhum comentário [PATI] registrado no DevOps para este chamado)\n`;
         }
@@ -332,7 +336,7 @@ export async function* streamChat(
   const hasSpecificData = extraContext.includes('DETALHES COMPLETOS') || extraContext.includes('Dados específicos');
   const contextBlock = hasSpecificData ? extraContext : `${dataContext}\n${extraContext}`;
 
-  const systemPrompt = `Você é a PATi, agente de suporte inteligente da Paradigma (SRM360).
+  const systemPrompt = `Você é a PATi, agente de suporte inteligente da Paradigma.
 Responda em pt-BR, de forma direta e profissional. Use markdown simples.
 
 **Personalidade:** Você é proativa, analítica e autônoma. Quando o usuário faz uma pergunta vaga ou o contexto é insuficiente, faça perguntas de esclarecimento antes de responder. Não tenha medo de pedir mais detalhes.
@@ -395,7 +399,7 @@ export async function getInterviewContext(workItemId: number, operatorProjects?:
     .trim()
     .slice(0, 1500);
 
-  const patiData = (wi.DiscussionPati || '').trim().slice(0, 350);
+  const patiData = keepMostRecentBlocks((wi.DiscussionPati || '').trim(), '\n\n---\n\n', 2000);
   const hasPati = patiData.length > 0;
 
   return {
@@ -447,13 +451,15 @@ export async function* streamInterview(
 
   const tipoLabel = tipo === 'SPEC' ? 'Especificação de Negócio' : tipo === 'APF' ? 'APF (Análise de Pontos de Função)' : 'APF + Especificação de Negócio';
 
-  const patiData = (wi.DiscussionPati || '').trim().slice(0, 350);
+  const patiData = keepMostRecentBlocks((wi.DiscussionPati || '').trim(), '\n\n---\n\n', 2000);
   const hasPati = patiData.length > 0;
   const hasDesc = descText.length > 0;
 
   // Contexto já coletado em entrevistas/refinamentos anteriores deste chamado — reaproveitado
   // para não obrigar o analista a repetir respostas já dadas (geração nova ou refinamento).
-  const contextoAcumulado = (await getContextoAcumulado(workItemId)).slice(0, 3000);
+  // getContextoAcumulado já prioriza as entrevistas MAIS RECENTES internamente — nada de
+  // truncar de novo aqui por cima (isso descartaria justamente o que acabou de ser priorizado).
+  const contextoAcumulado = await getContextoAcumulado(workItemId);
   const hasAcumulado = contextoAcumulado.length > 0;
 
   // Elementos já contados (tabela estruturada, não só prosa) — permite à PATi saber EXATAMENTE
@@ -519,11 +525,11 @@ ${hasElementos
   // If no history (first interaction), add a trigger and inject [PATI] status as first SSE chunk
   if (history.length === 0) {
     const patiStatusLine = hasElementos
-      ? `✅ Encontrei a contagem atual deste chamado:\n\n${elementosSummary}\n\n`
+      ? `✨ Encontrei a contagem atual deste chamado:\n\n${elementosSummary}\n\n`
       : hasAcumulado
-        ? `✅ Encontrei contexto de uma entrevista/ajuste anterior deste chamado — vou reaproveitar.\n\n`
+        ? `✨ Encontrei contexto de uma entrevista/ajuste anterior deste chamado — vou reaproveitar.\n\n`
         : hasPati
-          ? `✅ Encontrei análise prévia na tag [PATI] neste chamado.\n\n`
+          ? `✨ Encontrei análise prévia na tag [PATI] neste chamado.\n\n`
           : hasDesc
             ? `⚠️ Não há dados [PATI] neste chamado, mas há descrição disponível — usarei como base.\n\n`
             : `⚠️ Não há dados [PATI] nem descrição neste chamado — as respostas desta entrevista serão o principal insumo.\n\n`;

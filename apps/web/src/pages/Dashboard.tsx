@@ -1,10 +1,12 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { fetchWorkItems, fetchKpis, fetchFilters, fetchCharts, updateWorkItem, fetchNextPriority, generateApfDoc, generateSpecDoc, getDocDownloadUrl, downloadDocument, fetchDocStatus, fetchDocVersions, fetchSyncLast, cancelSync, API_BASE } from '../services/api';
+import { fetchWorkItems, fetchWorkItem, fetchKpis, fetchFilters, fetchCharts, updateWorkItem, getDocDownloadUrl, downloadDocument, fetchDocStatus, fetchDocVersions, fetchSyncLast, cancelSync, API_BASE } from '../services/api';
 import { getAccessToken } from '../auth/authFetch';
 import { useCurrentUser } from '../auth/RoleContext';
 import PatiChat from '../components/PatiChat';
 import PatiSprite from '../components/PatiSprite';
 import DocHistoryDrawer from '../components/DocHistoryDrawer';
+import MultiSelect from '../components/MultiSelect';
+import WorkItemModal from '../components/WorkItemModal';
 import type { WorkItem, Kpis, FilterOptions } from '../types';
 import {
   Chart as ChartJS,
@@ -156,6 +158,7 @@ export default function Dashboard() {
 
   // Modal / drawer state
   const [selectedItem, setSelectedItem] = useState<WorkItem | null>(null);
+  const [openingItemId, setOpeningItemId] = useState<number | null>(null);
   const [auditItem, setAuditItem] = useState<{ id: number; title: string } | null>(null);
 
   // Document status for all items
@@ -384,6 +387,24 @@ export default function Dashboard() {
   };
 
   const resetPage = () => setPage(1);
+
+  // Busca o WorkItem atualizado no servidor antes de abrir o modal de edição — a linha da
+  // lista em memória pode estar desatualizada (ex.: uma APF foi gerada via chat depois do
+  // último carregamento da tabela) e salvar qualquer campo do modal reenvia TODOS os campos,
+  // inclusive Esforço APF; sem isso, um valor antigo/nulo sobrescreve o real no banco (bug
+  // real observado: chamados com APF gerada apareciam sem horas após uma edição qualquer).
+  const openItemModal = async (item: WorkItem) => {
+    setOpeningItemId(item.Id);
+    try {
+      const fresh = await fetchWorkItem(item.Id);
+      setSelectedItem(fresh);
+    } catch (e) {
+      console.error(e);
+      setSelectedItem(item); // fallback: melhor mostrar dado desatualizado do que nada
+    } finally {
+      setOpeningItemId(null);
+    }
+  };
 
   const invalidateAndReload = useCallback(() => {
     _itemsCache = null;
@@ -706,8 +727,8 @@ export default function Dashboard() {
                 items.map(item => (
                   <tr
                     key={item.Id}
-                    className="border-b border-border last:border-0 hover:bg-[#f5f7ff] transition-colors duration-100 cursor-pointer"
-                    onClick={() => setSelectedItem(item)}
+                    className={`border-b border-border last:border-0 hover:bg-[#f5f7ff] transition-colors duration-100 cursor-pointer ${openingItemId === item.Id ? 'opacity-50 pointer-events-none' : ''}`}
+                    onClick={() => openItemModal(item)}
                   >
                     <td className="px-[10px] py-[10px] font-mono text-[12px] text-txt-3 whitespace-nowrap">
                       {item.Id}
@@ -854,244 +875,6 @@ export default function Dashboard() {
 /* ═══════════════════════════════════════════
    WorkItem Modal (edit inline)
    ═══════════════════════════════════════════ */
-function WorkItemModal({ item, onClose, onSave }: {
-  item: WorkItem;
-  onClose: () => void;
-  onSave: (id: number, data: Record<string, any>) => Promise<void>;
-}) {
-  const [categoria, setCategoria] = useState(item.Categoria || '');
-  const [tipo, setTipo] = useState(item.Tipo || '');
-  const [prioridade, setPrioridade] = useState<string>(item.Prioridade != null ? String(item.Prioridade) : '');
-  const [nextPrio, setNextPrio] = useState<number | null>(null);
-  const [esforco, setEsforco] = useState(item.EsforcoAPF ?? '');
-  const [impacto, setImpacto] = useState(item.ImpactoOperacao || '');
-  const [apfDispensado, setApfDispensado] = useState(item.ApfDispensado || false);
-  const [apfDispensadoMotivo, setApfDispensadoMotivo] = useState(item.ApfDispensadoMotivo || '');
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState('');
-
-  // Document generation
-  const [generating, setGenerating] = useState<'apf' | 'spec' | null>(null);
-  const [genError, setGenError] = useState('');
-  const [genSuccess, setGenSuccess] = useState('');
-
-  useEffect(() => {
-    setCategoria(item.Categoria || '');
-    setTipo(item.Tipo || '');
-    setPrioridade(item.Prioridade != null ? String(item.Prioridade) : '');
-    setEsforco(item.EsforcoAPF ?? '');
-    setImpacto(item.ImpactoOperacao || '');
-    setApfDispensado(item.ApfDispensado || false);
-    setApfDispensadoMotivo(item.ApfDispensadoMotivo || '');
-    // Fetch next available priority for this client
-    if (item.ClienteNome) {
-      fetchNextPriority(item.ClienteNome).then(n => setNextPrio(n)).catch(() => setNextPrio(0));
-    }
-  }, [item]);
-
-  // Close on Escape
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    setSaveError('');
-    if (apfDispensado && !apfDispensadoMotivo.trim()) {
-      setSaveError('Informe o motivo para dispensar este chamado de APF');
-      setSaving(false);
-      return;
-    }
-    if (apfDispensado && !(Number(esforco) > 0)) {
-      setSaveError('Informe o esforço estimado (em horas, maior que zero) para dispensar este chamado de APF');
-      setSaving(false);
-      return;
-    }
-    try {
-      await onSave(item.Id, {
-        categoria: categoria || null,
-        tipo: tipo || null,
-        prioridade: prioridade === '' ? null : Number(prioridade),
-        esforcoAPF: esforco === '' ? null : Number(esforco),
-        impactoOperacao: impacto || null,
-        apfDispensado,
-        apfDispensadoMotivo: apfDispensado ? apfDispensadoMotivo.trim() : null,
-      });
-    } catch (err: any) {
-      setSaveError(err.message || 'Erro ao salvar');
-    }
-    setSaving(false);
-  };
-
-  const handleGenerateApf = async () => {
-    setGenerating('apf'); setGenError(''); setGenSuccess('');
-    try {
-      const result = await generateApfDoc(item.Id);
-      setGenSuccess(`APF gerado: ${result.totalHoras}h (${result.elementos} elementos, ${result.totalPFA} PFA)`);
-      setEsforco(String(result.totalHoras));
-    } catch (err: any) {
-      setGenError(err.message);
-    }
-    setGenerating(null);
-  };
-
-  const handleGenerateSpec = async () => {
-    setGenerating('spec'); setGenError(''); setGenSuccess('');
-    try {
-      await generateSpecDoc(item.Id);
-      setGenSuccess('Especificação de negócio gerada com sucesso!');
-    } catch (err: any) {
-      setGenError(err.message);
-    }
-    setGenerating(null);
-  };
-
-
-  const inputCls = 'h-9 w-full px-3 border border-border rounded-sm bg-bg text-[13px] focus-ring transition-[border-color,box-shadow] duration-150';
-  const labelCls = 'text-[11px] font-semibold uppercase tracking-[.05em] text-txt-3 mb-1';
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className="bg-surface border border-border rounded-xl shadow-2xl w-full max-w-[640px] max-h-[90vh] overflow-auto animate-in"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <div>
-            <span className="text-[12px] font-mono text-txt-3 mr-2">#{item.Id}</span>
-            <span className="text-[15px] font-semibold text-txt">{item.Title}</span>
-          </div>
-          <button onClick={onClose} className="text-txt-3 hover:text-txt text-[18px] leading-none px-1">✕</button>
-        </div>
-
-        {/* Info */}
-        <div className="px-6 py-4 grid grid-cols-2 gap-x-6 gap-y-1 text-[13px] border-b border-border bg-surface-2">
-          <div><span className="text-txt-3">Cliente:</span> <span className="font-medium">{item.ClienteNome || '—'}</span></div>
-          <div><span className="text-txt-3">Módulo:</span> <span className="font-medium">{item.Modulo || '—'}</span></div>
-          <div><span className="text-txt-3">Responsável:</span> <span className="font-medium">{item.AssignedTo || '—'}</span></div>
-          <div><span className="text-txt-3">DevOps:</span> <span className="font-medium">{item.DevOpsState || '—'}</span></div>
-          <div><span className="text-txt-3">Origem:</span> <span className="font-medium">{item.ClassificacaoOrigem || '—'}</span></div>
-        </div>
-
-        {/* Editable fields */}
-        <div className="px-6 py-5 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <div className={labelCls}>Categoria</div>
-              <select className={inputCls} value={categoria} onChange={e => setCategoria(e.target.value)}>
-                <option value="">—</option>
-                <option value="Produto">Roadmap</option>
-                <option value="Hibrido">Hibrido</option>
-                <option value="Cliente">Customização</option>
-                <option value="Info Insuficiente">Indefinido</option>
-              </select>
-            </div>
-            <div>
-              <div className={labelCls}>Tipo</div>
-              <select className={inputCls} value={tipo} onChange={e => setTipo(e.target.value)}>
-                <option value="">—</option>
-                <option value="UX">UX</option>
-                <option value="RegraNegocio">Regra de Negócio</option>
-                <option value="Relatorio">Relatório</option>
-                <option value="Integracao">Integração</option>
-                <option value="WorkflowAprovacao">Workflow Aprovação</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <div className={labelCls}>Prioridade {nextPrio != null && <span className="text-txt-3 normal-case font-normal">(próximo: {nextPrio})</span>}</div>
-              <input
-                className={inputCls}
-                type="number"
-                step="1"
-                min="0"
-                inputMode="numeric"
-                placeholder="Número (manual)"
-                value={prioridade}
-                onChange={e => setPrioridade(e.target.value.replace(/[^0-9]/g, ''))}
-              />
-            </div>
-            <div>
-              <div className={labelCls}>Esforço {apfDispensado && <span className="text-danger normal-case font-normal">(obrigatório)</span>}</div>
-              <div className="relative">
-                <input
-                  className={`${inputCls} pr-8`}
-                  type="number"
-                  min="0"
-                  value={esforco}
-                  onChange={e => setEsforco(e.target.value)}
-                  placeholder="0"
-                />
-                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[12px] text-txt-3">h</span>
-              </div>
-            </div>
-            <div>
-              <div className={labelCls}>Impacto Operação</div>
-              <select className={inputCls} value={impacto} onChange={e => setImpacto(e.target.value)}>
-                <option value="">—</option>
-                <option value="Alto">Alto</option>
-                <option value="Médio">Médio</option>
-                <option value="Baixo">Baixo</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Dispensa de APF — chamados que não requerem contagem de pontos de função */}
-          <div className="pt-2 border-t border-border">
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={apfDispensado}
-                onChange={e => setApfDispensado(e.target.checked)}
-                className="w-4 h-4 accent-accent cursor-pointer"
-              />
-              <span className="text-[13px] font-medium text-txt">Este chamado não requer APF</span>
-            </label>
-            {apfDispensado && (
-              <input
-                className={`${inputCls} mt-2`}
-                type="text"
-                placeholder="Motivo (obrigatório) — ex: correção simples, não gera pontos de função"
-                value={apfDispensadoMotivo}
-                onChange={e => setApfDispensadoMotivo(e.target.value)}
-              />
-            )}
-          </div>
-        </div>
-
-
-
-        {/* Actions */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-border bg-surface-2">
-          {saveError ? (
-            <span className="text-[12px] text-danger">{saveError}</span>
-          ) : <span />}
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="h-9 px-4 border border-border rounded-sm bg-surface text-[13px] font-medium text-txt-2 hover:bg-[#f4f8ff] transition-colors duration-150"
-            >
-              Cancelar
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="h-9 px-5 rounded-sm bg-accent text-white text-[13px] font-semibold shadow-sm hover:bg-[#0044cc] disabled:opacity-50 transition-colors duration-150"
-            >
-              {saving ? 'Salvando...' : 'Salvar'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ═══════════════════════════════════════════
    Charts Grid — Premium Doughnuts
    ═══════════════════════════════════════════ */
@@ -1126,7 +909,7 @@ function statusColors(labels: string[]): string[] {
   return chartColors(labels.length);
 }
 
-const STATUS_LABELS: Record<string, string> = {
+export const STATUS_LABELS: Record<string, string> = {
   'New - In analysis': 'Aguardando atendimento',
   'Active - In progress': 'Em análise',
   'Active - Under development': 'Em desenvolvimento',
@@ -1567,82 +1350,4 @@ function ChartsGrid({
 /* ═══════════════════════════════════════════
    Multi-select dropdown (prototype style)
    ═══════════════════════════════════════════ */
-function MultiSelect({ label, options, selected, onChange, displayFn }: {
-  label: string; options: string[]; selected: string[]; onChange: (v: string[]) => void; displayFn?: (v: string) => string;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
-  const ref = useRef<HTMLDivElement>(null);
-  const display = displayFn || ((v: string) => v);
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('click', handler);
-    return () => document.removeEventListener('click', handler);
-  }, []);
-
-  const filtered = query
-    ? options.filter(o => display(o).toLowerCase().includes(query.toLowerCase()))
-    : options;
-
-  const allSelected = selected.length === 0;
-
-  const toggle = (val: string) => {
-    if (selected.includes(val)) onChange(selected.filter(s => s !== val));
-    else onChange([...selected, val]);
-  };
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="h-9 min-w-[130px] flex items-center justify-between gap-2 px-3 border border-border rounded-sm bg-bg text-[13px] focus-ring transition-[border-color,box-shadow] duration-150"
-        aria-expanded={open}
-      >
-        <span className={selected.length > 0 ? 'text-txt' : 'text-txt-3'}>
-          {selected.length > 0 ? `${label} (${selected.length})` : label}
-        </span>
-        <svg className="w-3 h-3 text-txt-3" fill="none" stroke="currentColor" viewBox="0 0 12 12">
-          <path d="M3 5l3 3 3-3" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open && (
-        <div className="absolute top-[calc(100%+6px)] left-0 w-[280px] max-h-[280px] overflow-auto bg-surface border border-border rounded-sm shadow p-1.5 z-10">
-          <input
-            autoFocus
-            placeholder="Buscar cliente..."
-            className="w-full h-[30px] mb-1.5 px-2 border border-border rounded-sm text-[12px] focus-ring"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-          />
-          {/* Todos */}
-          <label className="flex items-center gap-2 px-2 py-1.5 rounded-sm cursor-pointer hover:bg-[#f4f8ff] border-b border-border mb-1 pb-2 font-semibold text-[13px]">
-            <input
-              type="checkbox"
-              className="w-[14px] h-[14px]"
-              checked={allSelected}
-              onChange={() => onChange([])}
-            />
-            Todos
-          </label>
-          {filtered.map(opt => (
-            <label
-              key={opt}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-sm cursor-pointer hover:bg-[#f4f8ff] text-[13px]"
-            >
-              <input
-                type="checkbox"
-                className="w-[14px] h-[14px]"
-                checked={selected.includes(opt)}
-                onChange={() => toggle(opt)}
-              />
-              {display(opt)}
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}

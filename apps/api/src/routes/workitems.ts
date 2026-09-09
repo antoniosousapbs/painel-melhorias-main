@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { listWorkItems, getWorkItem, updateWorkItem, getKpis, getFilterOptions, getChartData, getNextPriority } from '../services/workitem.js';
+import { tryExtractUser } from '../utils/auth-user.js';
 
 const router = Router();
 
@@ -37,6 +38,7 @@ router.get('/', async (req, res) => {
       responsavel: req.query.responsavel as string,
       apf: req.query.apf as 'com' | 'sem' | undefined,
       search: req.query.search as string,
+      encerrados: req.query.encerrados === 'true',
     }, resolveEffectiveProjects(req));
     res.json(result);
   } catch (err: any) {
@@ -47,7 +49,7 @@ router.get('/', async (req, res) => {
 // GET /api/workitems/filters
 router.get('/filters', async (req, res) => {
   try {
-    const options = await getFilterOptions(resolveEffectiveProjects(req));
+    const options = await getFilterOptions(resolveEffectiveProjects(req), req.query.encerrados === 'true');
     res.json(options);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -107,6 +109,10 @@ router.patch('/:id', async (req, res) => {
     const existing = await getWorkItem(id, resolveEffectiveProjects(req));
     if (!existing) return res.status(404).json({ error: 'Not found' });
 
+    // Atribui a edição ao usuário autenticado de verdade (JWT) — nunca mais 'admin' fixo
+    // nem depende do frontend enviar `revisadoPor` (que nunca era enviado, na prática).
+    const user = tryExtractUser(req.headers.authorization);
+
     const updated = await updateWorkItem(id, {
       categoria: req.body.categoria,
       tipo: req.body.tipo,
@@ -116,7 +122,8 @@ router.patch('/:id', async (req, res) => {
       esforcoAPF: req.body.esforcoAPF,
       apfDispensado: req.body.apfDispensado,
       apfDispensadoMotivo: req.body.apfDispensadoMotivo,
-      revisadoPor: req.body.revisadoPor || 'admin',
+      revisadoPor: user?.name || req.body.revisadoPor || 'PATi',
+      revisadoPorEmail: user?.email,
     });
     res.json(updated);
   } catch (err: any) {

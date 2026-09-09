@@ -3,6 +3,8 @@ import { useState, useEffect, useRef } from 'react';
 import Dashboard from './pages/Dashboard';
 import Configuracoes from './pages/Configuracoes';
 import WorkItemDetail from './pages/WorkItemDetail';
+import Historico from './pages/Historico';
+import Audit from './pages/Audit';
 import Login from './pages/Login';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { RequireRole } from './auth/RequireRole';
@@ -118,16 +120,39 @@ export default function App() {
 
           {/* Right: nav links + user */}
           <div className="flex items-center gap-3">
+            {/* Dashboard é visível para TODOS os perfis — sem isso, quem não é Admin fica
+                sem nenhum caminho de volta a partir do Histórico. */}
+            <Link
+              to="/"
+              className={`h-8 px-3 rounded text-[13px] font-medium flex items-center transition-colors duration-150 ${
+                isDashboard
+                  ? 'bg-white/20 text-white'
+                  : 'text-white/70 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              Dashboard
+            </Link>
+            {/* Histórico é visível para TODOS os perfis (Admin e Operador), sem gate de isAdmin */}
+            <Link
+              to="/historico"
+              className={`h-8 px-3 rounded text-[13px] font-medium flex items-center transition-colors duration-150 ${
+                location.pathname === '/historico'
+                  ? 'bg-white/20 text-white'
+                  : 'text-white/70 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              Histórico
+            </Link>
             {isAdmin && (
               <Link
-                to="/"
+                to="/auditoria"
                 className={`h-8 px-3 rounded text-[13px] font-medium flex items-center transition-colors duration-150 ${
-                  isDashboard
+                  location.pathname === '/auditoria'
                     ? 'bg-white/20 text-white'
                     : 'text-white/70 hover:bg-white/10 hover:text-white'
                 }`}
               >
-                Dashboard
+                Auditoria
               </Link>
             )}
             {isAdmin && (
@@ -173,6 +198,15 @@ export default function App() {
       <div className="max-w-container mx-auto px-8 pt-7 pb-12">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/historico" element={<Historico />} />
+          <Route
+            path="/auditoria"
+            element={
+              <RequireRole role="Admin">
+                <Audit />
+              </RequireRole>
+            }
+          />
           <Route
             path="/configuracoes"
             element={

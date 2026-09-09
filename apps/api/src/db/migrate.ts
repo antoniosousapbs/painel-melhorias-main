@@ -62,6 +62,13 @@ export async function migrate() {
     );
   `);
 
+  // E-mail de quem alterou — permite buscar a foto do perfil (Microsoft Graph) na Auditoria.
+  // AlteradoPor (nome de exibição) é mantido como já era, só adicionamos o e-mail ao lado.
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('WorkItemAuditLog') AND name = 'AlteradoPorEmail')
+    ALTER TABLE WorkItemAuditLog ADD AlteradoPorEmail NVARCHAR(200) NULL;
+  `);
+
   await pool.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'PromptTemplates')
     CREATE TABLE PromptTemplates (
@@ -79,7 +86,7 @@ export async function migrate() {
     INSERT INTO Configuracoes (Chave, Valor, Descricao)
     VALUES (
       'wiql_query',
-      'SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = ''Support Case'' AND [System.State] NOT IN (''Closed'', ''Removed'') ORDER BY [System.Id] DESC',
+      'SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = ''Support Case'' AND [System.State] NOT IN (''Removed'', ''Canceled'') ORDER BY [System.Id] DESC',
       'Query WIQL usada para buscar work items do Azure DevOps'
     );
   `);
@@ -592,6 +599,48 @@ Retorne APENAS um JSON valido:')
       SELECT 'spec_revisao', ProviderId, FallbackProviderId FROM LlmUsoConfig WHERE Finalidade = 'spec_geracao'
         AND NOT EXISTS (SELECT 1 FROM LlmUsoConfig WHERE Finalidade = 'spec_revisao');
     END
+  `);
+
+  // ── Fix real (2026-08-21): a WIQL excluía chamados 'Closed' (encerrados), então o sync
+  // deletava fisicamente qualquer chamado que fechasse — impossibilitando qualquer histórico
+  // de "chamados encerrados". Migra bancos já existentes removendo só 'Closed' da exclusão
+  // (mantém 'Removed'/'Canceled' fora, esses sim são inválidos/apagados no DevOps de verdade).
+  // Idempotente: só aplica se a WIQL salva ainda tiver 'Closed' na lista de exclusão.
+  await pool.request().query(`
+    UPDATE Configuracoes
+    SET Valor = REPLACE(
+      REPLACE(Valor, 'NOT IN (''Closed'', ''Removed'', ''Canceled'')', 'NOT IN (''Removed'', ''Canceled'')'),
+      'NOT IN (''Closed'', ''Removed'')', 'NOT IN (''Removed'')'
+    )
+    WHERE Chave = 'wiql_query' AND Valor LIKE '%''Closed''%'
+  `);
+
+  // ── AuditLog: eventos gerais de auditoria (acesso, erro, sync) — complementa
+  // DocumentVersionHistory (gerações de APF/Spec) e WorkItemAuditLog (mudança de campo)
+  // numa visão unificada consultada por GET /api/audit.
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'AuditLog')
+    CREATE TABLE AuditLog (
+      Id         INT IDENTITY PRIMARY KEY,
+      EventType  NVARCHAR(30) NOT NULL,       -- 'ACESSO' | 'ERRO' | 'SYNC'
+      UserId     NVARCHAR(200) NULL,
+      UserName   NVARCHAR(200) NULL,
+      UserEmail  NVARCHAR(200) NULL,
+      WorkItemId INT NULL,
+      Detalhe    NVARCHAR(MAX) NULL,
+      Sucesso    BIT NOT NULL DEFAULT 1,
+      CriadoEm   DATETIME2 DEFAULT GETDATE()
+    );
+  `);
+
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_AuditLog_EventType' AND object_id = OBJECT_ID('AuditLog'))
+    CREATE INDEX IX_AuditLog_EventType ON AuditLog(EventType);
+  `);
+
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_AuditLog_CriadoEm' AND object_id = OBJECT_ID('AuditLog'))
+    CREATE INDEX IX_AuditLog_CriadoEm ON AuditLog(CriadoEm DESC);
   `);
 
   await pool.close();

@@ -26,9 +26,25 @@ function escopoParaTexto(items: { item: string; justificativa: string }[]): stri
 
 function formatCriterios(criterios: { dado: string; quando: string; entao: string }[]): string {
   if (!criterios.length) return '';
-  return ' Critérios de aceite: ' + criterios
-    .map(c => `Dado que ${c.dado}, quando ${c.quando}, então ${c.entao}.`)
-    .join(' ');
+  const bullets = criterios
+    .map(c => `• Dado que ${c.dado}, quando ${c.quando}, então ${c.entao}.`)
+    .join('\n');
+  return `\n\nCritérios de aceite:\n${bullets}`;
+}
+
+/** Prefixa a descrição com o parâmetro de entrada do requisito (mesma coluna "Descrição" do
+ * template, sem precisar de uma tag/coluna nova). */
+function formatEntrada(entrada: string): string {
+  return entrada ? `Entrada: ${entrada}\n\n` : '';
+}
+
+/** Evita repetir o mesmo ID de regra 2x seguidas quando a LLM já cita o ID dentro do próprio
+ * texto de "regraPrincipal" (ex.: "Aplicar RN-001" + regrasRelacionadas=["RN-001"] geraria
+ * "Aplicar RN-001 (Regras relacionadas: RN-001)" — só acrescenta os IDs ainda não citados). */
+function formatRegraPrincipal(regraPrincipal: string, regrasRelacionadas: string[]): string {
+  const idsNovos = regrasRelacionadas.filter(id => !regraPrincipal.includes(id));
+  if (!idsNovos.length) return regraPrincipal;
+  return `${regraPrincipal} (Regras relacionadas: ${idsNovos.join(', ')})`;
 }
 
 /**
@@ -43,10 +59,10 @@ export function mapEstruturadaParaTags(spec: SpecEstruturada, extras: { produto?
     demanda_titulo: `#${spec.demanda.workItemId} - ${spec.demanda.titulo}`,
     produto: extras.produto || spec.demanda.modulo || 'N/A',
     cliente: spec.demanda.cliente || 'N/A',
-    autor: versaoAtual?.autor || 'PATi',
+    autor: versaoAtual?.autor || 'Equipe Paradigma',
     versaoAtual: versaoAtual?.versao || '1.0',
     dataAtual: versaoAtual?.data || new Date().toLocaleDateString('pt-BR'),
-    status: extras.status || 'Gerado automaticamente pela PATi',
+    status: extras.status || 'Elaborado com base nas informações coletadas junto ao cliente',
 
     versionamento: spec.versionamento,
     historicoAlteracoes: spec.historicoAlteracoes,
@@ -71,8 +87,8 @@ export function mapEstruturadaParaTags(spec: SpecEstruturada, extras: { produto?
       id: r.id,
       titulo: r.titulo,
       prioridade: r.prioridade,
-      descricao: r.descricao + formatCriterios(r.criteriosAceite),
-      regraPrincipal: r.regraPrincipal + (r.regrasRelacionadas.length ? ` (Regras relacionadas: ${r.regrasRelacionadas.join(', ')})` : ''),
+      descricao: formatEntrada(r.entrada) + r.descricao + formatCriterios(r.criteriosAceite),
+      regraPrincipal: formatRegraPrincipal(r.regraPrincipal, r.regrasRelacionadas),
       beneficio: r.beneficio,
     })),
     regrasNegocio: spec.regrasNegocio,

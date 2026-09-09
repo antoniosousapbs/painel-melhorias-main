@@ -12,8 +12,10 @@ import documentsRouter from './routes/documents.js';
 import meRouter from './routes/me.js';
 import usersRouter from './routes/users.js';
 import llmRouter from './routes/llm.js';
+import auditRouter from './routes/audit.js';
 import { syncFromDevOps } from './services/devops-sync.js';
 import { validateToken, resolveRole, requireAnyAccess, verifyTokenString, resolveUserSyncScope } from './middleware/auth.js';
+import { logAudit } from './utils/audit.js';
 
 // Tenta .env na pasta atual (produção) ou ../../.env (desenvolvimento monorepo)
 const envPaths = [
@@ -32,9 +34,11 @@ if (envPath) {
 // derruba o processo inteiro sem log algum — todos os usuários caem junto, sem rastro.
 process.on('unhandledRejection', (reason) => {
   console.error('⚠️  Unhandled Rejection (não derrubou o processo):', reason);
+  logAudit({ eventType: 'ERRO', detalhe: `unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}`, sucesso: false });
 });
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception — encerrando para o PM2 reiniciar limpo:', err);
+  logAudit({ eventType: 'ERRO', detalhe: `uncaughtException: ${err.message}`, sucesso: false });
   process.exit(1);
 });
 
@@ -102,6 +106,7 @@ app.use('/api/users', usersRouter);
 app.use('/api', adminRouter);
 app.use('/api', chatRouter);
 app.use('/api', llmRouter);
+app.use('/api/audit', auditRouter);
 
 // Manual sync trigger (REST) — mesma ação do /api/sync/trigger (admin.ts), mantido por compatibilidade.
 // Disponível para qualquer usuário autenticado — a sincronização não é mais exclusiva de Admin,
@@ -123,9 +128,18 @@ cron.schedule('0 */2 * * *', async () => {
   try {
     const result = await syncFromDevOps(undefined, null);
     console.log(`✅ Sync complete: ${result.total} items (${result.created} new, ${result.updated} updated)`);
-  } catch (err) {
+  } catch (err: any) {
     console.error('❌ Scheduled sync failed:', err);
+    logAudit({ eventType: 'SYNC', detalhe: `Sync agendada falhou: ${err.message}`, sucesso: false });
   }
+});
+
+// Middleware de erro do Express — rede de segurança final para exceções que escaparem
+// dos try/catch de cada rota (a maioria já responde 500 localmente e nunca chega aqui).
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('❌ Erro não tratado na rota:', err);
+  logAudit({ eventType: 'ERRO', detalhe: `${req.method} ${req.path}: ${err?.message || err}`, sucesso: false });
+  if (!res.headersSent) res.status(500).json({ error: 'Erro interno do servidor' });
 });
 
 app.listen(PORT, () => {

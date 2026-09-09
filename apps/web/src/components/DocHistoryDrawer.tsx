@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { fetchDocVersions, downloadDocument, API_BASE } from '../services/api';
+import UserAvatar from './UserAvatar';
 
 interface DocVersion {
   Id: number;
@@ -18,14 +19,6 @@ function fmtDate(iso: string) {
   const d = new Date(iso);
   return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })
     + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-}
-
-function initials(name: string) {
-  if (!name) return '?';
-  const parts = name.trim().split(/\s+/);
-  return parts.length >= 2
-    ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
-    : name.slice(0, 2).toUpperCase();
 }
 
 interface Props {
@@ -154,9 +147,7 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
 
                       {v.GeradoPorNome ? (
                         <div className="flex items-center gap-1.5 mt-1.5">
-                          <div className="w-5 h-5 rounded-full bg-[#e0e7ff] text-[#3730a3] text-[9px] font-bold flex items-center justify-center shrink-0">
-                            {initials(v.GeradoPorNome)}
-                          </div>
+                          <UserAvatar nome={v.GeradoPorNome} email={v.GeradoPorEmail} size={20} />
                           <span className="text-[12px] text-txt-2">{v.GeradoPorNome}</span>
                           {v.GeradoPorEmail && (
                             <span className="text-[11px] text-txt-3 truncate">({v.GeradoPorEmail})</span>

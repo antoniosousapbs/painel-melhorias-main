@@ -233,7 +233,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
             if (data.type === 'start') {
               total = data.total;
               if (total === 0) {
-                updateLastMsg('✅ Não há chamados pendentes para classificar!');
+                updateLastMsg('✨ Não há chamados pendentes para classificar!');
               } else {
                 updateLastMsg(`🔄 Classificando **${total}** chamados pendentes...`);
                 setProgress({ pct: 0, current: 0, total });
@@ -252,7 +252,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
             } else if (data.type === 'done') {
               setProgress(null);
               const lines = [
-                `✅ Classificação concluída!`,
+                `✨ Classificação concluída!`,
                 ``,
                 `- **${data.classified}** chamados classificados`,
               ];
@@ -372,7 +372,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
             if (data.type === 'start') {
               totalSteps = data.total;
               if (totalSteps === 0 && data.skipped > 0) {
-                updateLastMsg(`✅ Todos os **${data.skipped}** chamados já possuem documentos gerados.\n\n💡 Para refazer, diga: "refazer APF do 318350" ou "recontar todos".`);
+                updateLastMsg(`✨ Todos os **${data.skipped}** chamados já possuem documentos gerados.\n\n💡 Para refazer, diga: "refazer APF do 318350" ou "recontar todos".`);
               } else if (totalSteps === 0) {
                 updateLastMsg('ℹ️ Nenhum chamado encontrado para geração de documentos no filtro atual.');
               } else {
@@ -389,7 +389,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
               const detail = data.step === 'APF'
                 ? ` → **${data.totalPF} PF** | **${data.totalHoras}h** (${data.elapsed})`
                 : ` (${data.elapsed})`;
-              setStatus(`✅ #${data.id} ${data.step}${detail}`);
+              setStatus(`✨ #${data.id} ${data.step}${detail}`);
               updateLastMsg(`🔄 Gerando... **${data.current}/${data.total}** (${data.pct}%)\n\nÚltimo: #${data.id} ${data.step}${detail}`);
             } else if (data.type === 'error') {
               setStatus(`❌ #${data.id} ${data.step}: ${data.message}`);
@@ -400,7 +400,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
               if (data.generated === 0 && data.total === 0) {
                 const lines: string[] = [];
                 if (data.skipped > 0) {
-                  lines.push(`✅ Todos os **${data.skipped}** chamados já possuem documentos gerados.`);
+                  lines.push(`✨ Todos os **${data.skipped}** chamados já possuem documentos gerados.`);
                   lines.push('');
                   lines.push('💡 Para refazer, diga: "refazer APF do 318350" ou "recontar todos".');
                 } else {
@@ -408,7 +408,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
                 }
                 updateLastMsg(lines.join('\n'));
               } else {
-                const lines: string[] = ['✅ **Geração concluída!**\n'];
+                const lines: string[] = ['✨ **Geração concluída!**\n'];
                 if (data.generated > 0) lines.push(`- **${data.generated}** documento(s) gerado(s)`);
                 if (data.errors > 0) lines.push(`- **${data.errors}** erro(s)`);
                 if (data.skipped > 0) lines.push(`- **${data.skipped}** já possuíam docs (mantidos)`);
@@ -463,7 +463,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       if (!res.ok) throw new Error(data.error || 'Erro ao refinar APF');
 
       const lines = [
-        `✅ **APF refinada com sucesso!**\n`,
+        `✨ **APF refinada com sucesso!**\n`,
         `**Alterações:** ${data.changes}\n`,
         `- **${data.elementos}** elementos funcionais`,
         `- **${data.totalPF} PF** → **${data.totalPFA} PFA**`,
@@ -738,7 +738,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         setMessages(prev => {
           const copy = [...prev];
           copy[copy.length - 1] = { role: 'assistant', content:
-            `✅ **#${singleClassify.id}** classificado!\n\n` +
+            `✨ **#${singleClassify.id}** classificado!\n\n` +
             `- **Categoria:** ${cl.categoria}\n` +
             `- **Tipo:** ${cl.tipo}\n` +
             `- **Módulo:** ${cl.modulo || 'N/A'}\n` +

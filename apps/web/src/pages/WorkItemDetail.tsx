@@ -1,15 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchWorkItem, updateWorkItem, fetchAudit, classifyOne, fetchNextPriority } from '../services/api';
+import { fetchWorkItem, updateWorkItem, fetchAudit, fetchNextPriority } from '../services/api';
 import type { WorkItem } from '../types';
 
 type IconProps = { className?: string };
-const IconSpark = ({ className }: IconProps) => (
-  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M12 3.5c.5 3 2 4.5 5 5-3 .5-4.5 2-5 5-.5-3-2-4.5-5-5 3-.5 4.5-2 5-5z" strokeLinecap="round" strokeLinejoin="round"/>
-    <path d="M18.5 14.5c.3 1.5 1 2.2 2.5 2.5-1.5.3-2.2 1-2.5 2.5-.3-1.5-1-2.2-2.5-2.5 1.5-.3 2.2-1 2.5-2.5z" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
 const IconPencil = ({ className }: IconProps) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <path d="M4 20l.9-3.8L15.5 5.6a1.8 1.8 0 012.6 0l1.3 1.3a1.8 1.8 0 010 2.6L8.8 20l-4.1.9a.7.7 0 01-.7-.9z" strokeLinecap="round" strokeLinejoin="round"/>
@@ -37,7 +31,6 @@ export default function WorkItemDetail() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
-  const [classifying, setClassifying] = useState(false);
   const [nextPrio, setNextPrio] = useState<number | null>(null);
 
   const [form, setForm] = useState({
@@ -86,18 +79,6 @@ export default function WorkItemDetail() {
       setSaveError(err.message || 'Erro ao salvar');
     }
     setSaving(false);
-  };
-
-  const handleClassify = async () => {
-    if (!id) return;
-    setClassifying(true);
-    try {
-      await classifyOne(parseInt(id));
-      await load();
-    } catch {
-      alert('Erro ao classificar (Ollama está rodando?)');
-    }
-    setClassifying(false);
   };
 
   if (!item) {
@@ -149,22 +130,6 @@ export default function WorkItemDetail() {
         <div className="flex items-center justify-between mb-5">
           <h4 className="text-[13px] font-semibold tracking-tight text-txt">Classificação</h4>
           <div className="flex gap-2">
-            <button
-              onClick={handleClassify}
-              disabled={classifying}
-              className="h-9 px-3 border border-[#bfdbfe] rounded-sm bg-[#eff6ff] text-[13px] font-medium text-[#1d4ed8] hover:bg-[#f4f8ff] hover:border-[#bfd2ff] disabled:opacity-50 transition-colors duration-150"
-            >
-              {classifying ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" strokeLinecap="round"/>
-                  </svg>
-                  Classificando...
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1.5"><IconSpark className="w-3.5 h-3.5" /> Classificar via IA</span>
-              )}
-            </button>
             {!editing ? (
               <button
                 onClick={() => setEditing(true)}

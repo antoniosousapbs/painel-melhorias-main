@@ -48,8 +48,9 @@ export async function fetchKpis(filters?: { cliente?: string; categoria?: string
   return res.json();
 }
 
-export async function fetchFilters() {
-  const res = await authFetch(`${API_BASE}/workitems/filters`);
+export async function fetchFilters(opts?: { encerrados?: boolean }) {
+  const q = opts?.encerrados ? '?encerrados=true' : '';
+  const res = await authFetch(`${API_BASE}/workitems/filters${q}`);
   if (!res.ok) throw new Error('Failed to fetch filters');
   return res.json();
 }
@@ -391,6 +392,35 @@ export async function fetchDocVersions(workItemId: number) {
   const res = await authFetch(`${API_BASE}/documents/${workItemId}/versions`);
   if (!res.ok) throw new Error('Failed to fetch versions');
   return res.json();
+}
+
+export interface UnifiedAuditItem {
+  UniqueId: string;
+  Source: 'DOC' | 'CAMPO' | 'SYS';
+  EventType: string;
+  Data: string;
+  WorkItemId: number | null;
+  WorkItemTitle: string | null;
+  UsuarioNome: string | null;
+  UsuarioEmail: string | null;
+  Detalhe: string | null;
+  Sucesso: boolean;
+}
+
+export async function fetchUnifiedAudit(params: {
+  page?: number; size?: number; eventType?: string; user?: string; workItemId?: number; from?: string; to?: string;
+}) {
+  const q = new URLSearchParams();
+  if (params.page) q.set('page', String(params.page));
+  if (params.size) q.set('size', String(params.size));
+  if (params.eventType) q.set('eventType', params.eventType);
+  if (params.user) q.set('user', params.user);
+  if (params.workItemId) q.set('workItemId', String(params.workItemId));
+  if (params.from) q.set('from', params.from);
+  if (params.to) q.set('to', params.to);
+  const res = await authFetch(`${API_BASE}/audit?${q}`);
+  if (!res.ok) throw new Error('Failed to fetch audit log');
+  return res.json() as Promise<{ total: number; page: number; size: number; items: UnifiedAuditItem[] }>;
 }
 
 // ── Identidade / Papéis (RBAC) ─────────────────────────────────────────────────
