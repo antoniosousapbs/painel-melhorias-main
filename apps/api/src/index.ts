@@ -46,7 +46,10 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '3001');
 
 app.use(cors());
-app.use(express.json());
+// Limite padrão do Express (100kb) já cobria o corpo normal da API, mas entrevistas muito
+// longas com a PATi (interviewContext compilado) podem passar disso — sem essa folga, o corpo
+// de POST cairia no mesmo problema que a query string tinha (requisição rejeitada sem log).
+app.use(express.json({ limit: '5mb' }));
 
 // Health check (público, sem autenticação)
 app.get('/api/health', (_req, res) => {

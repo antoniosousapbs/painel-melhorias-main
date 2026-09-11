@@ -518,7 +518,11 @@ export function calculateApf(elementos: ApfElement[], params: ApfParametros): Ap
 }
 
 // ─── Generate APF for a work item ───
-export async function generateApf(workItemId: number, extraContext?: string): Promise<{ apf: ApfResult; resumoGeral: string; sintese: SintesePati }> {
+export async function generateApf(
+  workItemId: number,
+  extraContext?: string,
+  auditUser?: { userId: string; name: string; email: string } | null,
+): Promise<{ apf: ApfResult; resumoGeral: string; sintese: SintesePati }> {
   const pool = await getPool();
 
   // Get work item
@@ -550,7 +554,7 @@ export async function generateApf(workItemId: number, extraContext?: string): Pr
 
   // Gera o Excel (único documento de APF hoje — PDF removido; a memória de cálculo agora traz
   // um resumo executivo estruturado; a trilha de auditoria completa virou um PDF à parte).
-  const excelBuffer = await generateApfExcel(wi, apf, params, sintese, { askAtual: extraContext });
+  const excelBuffer = await generateApfExcel(wi, apf, params, sintese, { askAtual: extraContext, geradoPorNome: auditUser?.name || null });
 
   // Save Excel document to DB
   await pool.request()
@@ -878,7 +882,7 @@ Retorne APENAS um JSON válido:
     .query(`UPDATE WorkItems SET EsforcoAPF = @horas, AtualizadoEm = GETDATE() WHERE Id = @id`);
 
   // Regenerate Excel (único documento de APF hoje — PDF removido)
-  const excelBuffer = await generateApfExcel(wi, apf, params, sintese, { askAtual: instrucao });
+  const excelBuffer = await generateApfExcel(wi, apf, params, sintese, { askAtual: instrucao, geradoPorNome: auditUser?.name || null });
 
   // Update Excel document
   await pool.request()
@@ -1128,6 +1132,33 @@ function setCellValue(xml: string, cellRef: string, value: string | number | nul
   return xml;
 }
 
+/** Igual a `setCellValue`, mas grava múltiplos "runs" de texto rico (cada um podendo ser
+ * negrito ou não) na mesma célula via inlineStr — usado quando a célula do template já contém
+ * um rótulo fixo (ex.: "DESCRIÇÃO DA CUSTOMIZAÇÃO") que precisa continuar visível em negrito,
+ * seguido do conteúdo real em peso normal (a caixa não tem uma célula de valor separada).
+ * `styleId`, quando informado, troca o `s` da célula (ex.: estilo original da célula é
+ * horizontal="justify", pensado só pra texto corrido — aplicado ao rótulo em negrito de uma
+ * única linha, "justify" espalha as palavras pra preencher a largura toda, com espaçamento
+ * gigante entre elas; um clone horizontal="left" resolve sem perder o resto da formatação). */
+function setCellRichText(xml: string, cellRef: string, runs: { bold?: boolean; text: string }[], styleId?: number): string {
+  const selfClosing = new RegExp(`<c r="${cellRef}"([^>]*?)/>`, 's');
+  const withContent = new RegExp(`<c r="${cellRef}"([^>]*?)>.*?</c>`, 's');
+  const stripType = (attrs: string) => {
+    let a = attrs.replace(/\s*t="[^"]*"/, '');
+    if (styleId !== undefined) a = a.replace(/\s*s="\d+"/, ` s="${styleId}"`);
+    return a;
+  };
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const runsXml = runs.map(r => `<r>${r.bold ? '<rPr><b/></rPr>' : ''}<t xml:space="preserve">${esc(r.text)}</t></r>`).join('');
+  const buildReplacement = (attrs: string) => `<c r="${cellRef}"${stripType(attrs)} t="inlineStr"><is>${runsXml}</is></c>`;
+
+  let match = xml.match(selfClosing);
+  if (match) return xml.replace(selfClosing, buildReplacement(match[1]));
+  match = xml.match(withContent);
+  if (match) return xml.replace(withContent, buildReplacement(match[1]));
+  return xml;
+}
+
 // Ajusta a altura de uma linha (para caber texto quebrado em várias linhas — sem isso o Excel
 // mantém a altura padrão de 1 linha e o texto excedente fica visualmente cortado).
 function setRowHeight(xml: string, rowNum: number, heightPt: number): string {
@@ -1145,6 +1176,16 @@ function setRowHeight(xml: string, rowNum: number, heightPt: number): string {
 function estimateWrappedLines(text: string, charsPerLine: number): number {
   if (!text) return 1;
   return Math.max(1, Math.ceil(text.length / charsPerLine));
+}
+
+// Igual a `estimateWrappedLines`, mas soma linha a linha respeitando quebras "\n" explícitas
+// do texto (cada uma força uma nova linha, curta ou não) — sem isso, um texto com várias quebras
+// reais mas segmentos curtos entre elas tinha sua altura SUBESTIMADA (dividia o total de
+// caracteres pela largura da coluna como se fosse um bloco corrido só), cortando visualmente o
+// conteúdo (ex.: "O que foi solicitado" na Memória de Cálculo, compilado de várias entrevistas).
+function estimateWrappedLinesMultiline(text: string, charsPerLine: number): number {
+  if (!text) return 1;
+  return text.split('\n').reduce((sum, segment) => sum + Math.max(1, Math.ceil(segment.length / charsPerLine)), 0);
 }
 
 // Clona entradas de cellXfs (styles.xml) adicionando vertical="center", preservando fonte/
@@ -1173,7 +1214,61 @@ function cloneCellXfsWithVerticalCenter(stylesXml: string, sourceIndices: number
   return { stylesXml: stylesXml.replace(section[0], newSection), indexMap };
 }
 
-// ─── Abas suplementares do Excel de APF: "Memória de Cálculo" e "Auditoria da Comunicação" ───
+// Igual a `cloneCellXfsWithVerticalCenter`, mas força horizontal="center" também — usado quando
+// o estilo original tem alinhamento horizontal diferente de centro (ex.: "right", herdado de uma
+// célula de valor monetário reaproveitada em outra área da planilha) e a coluna precisa ficar
+// centralizada nos dois eixos, não só verticalmente.
+function cloneCellXfsForceCenter(stylesXml: string, sourceIndices: number[]): { stylesXml: string; indexMap: Record<number, number> } {
+  const section = stylesXml.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/);
+  if (!section) return { stylesXml, indexMap: {} };
+  const originalCount = parseInt(section[1]);
+  const body = section[2];
+  const parts = body.split(/(?=<xf )/).filter(s => s.trim().length > 0);
+  const indexMap: Record<number, number> = {};
+  const cloned: string[] = [];
+  sourceIndices.forEach((srcIdx) => {
+    const original = parts[srcIdx];
+    if (!original) return;
+    // Reconstrói a tag <alignment> do zero (força horizontal/vertical=center), preservando
+    // wrapText quando presente — mais simples e seguro que remendar atributos existentes.
+    const wrapText = /wrapText="1"/.test(original);
+    const centered = original.replace(
+      /<alignment[^/]*\/>/,
+      `<alignment horizontal="center" vertical="center"${wrapText ? ' wrapText="1"' : ''}/>`,
+    );
+    indexMap[srcIdx] = originalCount + cloned.length;
+    cloned.push(centered);
+  });
+  const newSection = `<cellXfs count="${originalCount + cloned.length}">${body}${cloned.join('')}</cellXfs>`;
+  return { stylesXml: stylesXml.replace(section[0], newSection), indexMap };
+}
+
+// Clona um estilo trocando SÓ o alinhamento horizontal, preservando vertical/wrap/fonte/borda —
+// usado quando um estilo do template é "justify" (pensado pra parágrafo corrido) mas precisa
+// virar "left" pra um texto de uma linha só (ex.: rótulo em negrito): "justify" estica as
+// poucas palavras da linha até preencher a largura toda, com espaçamento enorme entre elas.
+function cloneCellXfsWithHorizontal(stylesXml: string, sourceIndices: number[], horizontal: string): { stylesXml: string; indexMap: Record<number, number> } {
+  const section = stylesXml.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/);
+  if (!section) return { stylesXml, indexMap: {} };
+  const originalCount = parseInt(section[1]);
+  const body = section[2];
+  const parts = body.split(/(?=<xf )/).filter(s => s.trim().length > 0);
+  const indexMap: Record<number, number> = {};
+  const cloned: string[] = [];
+  sourceIndices.forEach((srcIdx) => {
+    const original = parts[srcIdx];
+    if (!original) return;
+    const changed = /horizontal="/.test(original)
+      ? original.replace(/horizontal="[^"]*"/, `horizontal="${horizontal}"`)
+      : original.replace(/<alignment /, `<alignment horizontal="${horizontal}" `);
+    indexMap[srcIdx] = originalCount + cloned.length;
+    cloned.push(changed);
+  });
+  const newSection = `<cellXfs count="${originalCount + cloned.length}">${body}${cloned.join('')}</cellXfs>`;
+  return { stylesXml: stylesXml.replace(section[0], newSection), indexMap };
+}
+
+
 // 100% ADITIVAS — construídas do zero (inlineStr, sem depender de sharedStrings.xml nem dos
 // estilos do template), nunca tocam nas abas Contagem/Funções (exigência: modelo atual
 // "blindado", a melhoria é só incremental). Substituem o conteúdo que só existia no PDF da
@@ -1271,17 +1366,24 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
   const bordersCount = parseInt(bordersSection[1]);
   const hair = (rgb: string) => `style="hair"><color rgb="${rgb}"/></`;
   const thin = (rgb: string) => `style="thin"><color rgb="${rgb}"/></`;
+  // Caixa fechada nos 4 lados: topo na cor/estilo pedido (identifica o tipo de linha — forte
+  // logo após uma seção, fina entre linhas seguintes), demais 3 lados sempre em hairline cinza
+  // clara (fecha o perímetro sem competir visualmente com o topo). Usado em TODAS as bandas de
+  // texto do relatório — nenhuma linha deve ficar com borda "incompleta" (só topo).
+  const box = (topThinColor: string | null, topHairColor: string | null, sideColor = 'FFD9DEE7') =>
+    `<border><left ${hair(sideColor)}left><right ${hair(sideColor)}right><top ${topThinColor ? thin(topThinColor) : hair(topHairColor!)}top><bottom ${hair(sideColor)}bottom><diagonal/></border>`;
   const newBorders = [
     `<border><left/><right/><top/><bottom ${thin('FF1F3864')}bottom><diagonal/></border>`, // 0 sublinhado de seção
-    `<border><left/><right/><top ${thin('FF1F3864')}top><bottom/><diagonal/></border>`, // 1 topo forte (1º após seção)
-    `<border><left/><right/><top ${hair('FFE2E6EC')}top><bottom/><diagonal/></border>`, // 2 topo fino (entre linhas)
-    `<border><left/><right/><top ${thin('FFC9CFD8')}top><bottom/><diagonal/></border>`, // 3 topo 1ª linha de tabela
-    `<border><left/><right/><top ${thin('FF7C8798')}top><bottom/><diagonal/></border>`, // 4 topo linha TOTAL
-    `<border><left/><right ${hair('FFD9DEE7')}right><top ${thin('FF1F3864')}top><bottom/><diagonal/></border>`, // 5 chip 1º campo
-    `<border><left/><right ${hair('FFD9DEE7')}right><top ${hair('FFE2E6EC')}top><bottom/><diagonal/></border>`, // 6 chip campos seguintes
-    `<border><left/><right/><top ${hair('FFC9CFD8')}top><bottom/><diagonal/></border>`, // 7 nota de vigência (topo)
+    box('FF1F3864', null), // 1 caixa fechada — topo forte (1º após seção/cabeçalho)
+    box(null, 'FFE2E6EC'), // 2 caixa fechada — topo fino (entre linhas)
+    box('FFC9CFD8', null), // 3 caixa fechada — topo 1ª linha de tabela (cabeçalho)
+    box('FF7C8798', null), // 4 caixa fechada — topo linha TOTAL
+    box(null, 'FFC9CFD8'), // 5 caixa fechada — nota de vigência
   ];
-  const [bSectionUnderline, bTopStrong, bTopHair, bTopFirstRow, bTopTotal, bChipFirst, bChipRest, bDisclaimer] = newBorders.map((_, i) => bordersCount + i);
+  const [bSectionUnderline, bTopStrong, bTopHair, bTopFirstRow, bTopTotal, bDisclaimer] = newBorders.map((_, i) => bordersCount + i);
+  // Chip/card das linhas de campo usam a MESMA caixa fechada de topo forte/fino (bTopStrong/
+  // bTopHair) — antes tinham borda própria incompleta (só topo/direita); unificado.
+  const bFieldBoxFirst = bTopStrong, bFieldBoxRest = bTopHair;
   out = out.replace(bordersSection[0], `<borders count="${bordersCount + newBorders.length}">${bordersSection[2]}${newBorders.join('')}</borders>`);
 
   const cellXfsSection = out.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/)!;
@@ -1294,30 +1396,32 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
     xf(fMetaGray, 0, 0, 'left', 'center'), // 2 metaGray
     xf(fMetaGray, 0, bSectionUnderline, 'left', 'center'), // 3 metaGrayBorder
     xf(fSection, 0, bSectionUnderline, 'left', 'center', false), // 4 section
-    xf(fChip, fillTableHdr, bChipFirst, 'center', 'center'), // 5 fieldLabelFirst
-    xf(fChip, fillTableHdr, bChipRest, 'center', 'center'), // 6 fieldLabelRest
-    xf(fBody, 0, bTopStrong, 'justify', 'center'), // 7 fieldCardFirst
-    xf(fBody, 0, bTopHair, 'justify', 'center'), // 8 fieldCardRest
+    xf(fChip, fillTableHdr, bFieldBoxFirst, 'center', 'center'), // 5 fieldLabelFirst
+    xf(fChip, fillTableHdr, bFieldBoxRest, 'center', 'center'), // 6 fieldLabelRest
+    xf(fBody, 0, bFieldBoxFirst, 'justify', 'center'), // 7 fieldCardFirst
+    xf(fBody, 0, bFieldBoxRest, 'justify', 'center'), // 8 fieldCardRest
     xf(fBodyBold, fillTableHdr, bTopStrong, 'center', 'center', false), // 9 tableHeaderFirst
-    xf(fBodyBold, fillTableHdr, 0, 'center', 'center', false), // 10 tableHeader
-    xf(fBody, 0, bTopFirstRow, 'left', 'center', false), // 11 dataFirstLeft
-    xf(fBody, 0, bTopFirstRow, 'center', 'center', false), // 12 dataFirstCenter
-    xf(fBody, 0, bTopFirstRow, 'right', 'center', false), // 13 dataFirstRight
-    xf(fBody, 0, bTopHair, 'left', 'center', false), // 14 dataRestLeft
-    xf(fBody, 0, bTopHair, 'center', 'center', false), // 15 dataRestCenter
-    xf(fBody, 0, bTopHair, 'right', 'center', false), // 16 dataRestRight
+    xf(fBodyBold, fillTableHdr, bTopFirstRow, 'center', 'center', false), // 10 tableHeader
+    xf(fBody, 0, bTopFirstRow, 'left', 'center'), // 11 dataFirstLeft
+    xf(fBody, 0, bTopFirstRow, 'center', 'center'), // 12 dataFirstCenter
+    xf(fBody, 0, bTopFirstRow, 'right', 'center'), // 13 dataFirstRight
+    xf(fBody, 0, bTopHair, 'left', 'center'), // 14 dataRestLeft
+    xf(fBody, 0, bTopHair, 'center', 'center'), // 15 dataRestCenter
+    xf(fBody, 0, bTopHair, 'right', 'center'), // 16 dataRestRight
     xf(fBodyBold, fillTableHdr, bTopTotal, 'left', 'center', false), // 17 totalRowLeft
     xf(fBodyBold, fillTableHdr, bTopTotal, 'right', 'center', false), // 18 totalRowRight
     xf(fTotalHoras, fillTotalHoras, bTopHair, 'left', 'center'), // 19 totalHoursHighlight
     xf(fTotalPFA, fillTotalPFA, bTopHair, 'left', 'center'), // 20 totalPFAHighlight
     xf(fBodyBold, 0, bTopStrong, 'left', 'center'), // 21 agregadoFirstBold
     xf(fBody, 0, bTopHair, 'left', 'center'), // 22 agregadoRest
-    xf(fSmall, fillCard, bTopStrong, 'left', 'center'), // 23 matrixFirst
-    xf(fSmall, fillCard, bTopHair, 'left', 'center'), // 24 matrixMid
-    xf(fSmall, fillCard, 0, 'left', 'center'), // 25 matrixLast
-    xf(fSmall, 0, 0, 'left', 'center'), // 26 legendText
-    xf(fSmall, 0, bDisclaimer, 'left', 'center'), // 27 disclaimer
-    xf(fBodyBold, fillCard, 0, 'left', 'center', false), // 28 subtotalSummary
+    // Matriz/legenda/nota usavam fSmall (8pt) — menor que o resto do relatório (fBody, 9pt),
+    // dando a impressão de inconsistência de formatação nas últimas seções. Unificado em fBody.
+    xf(fBody, fillCard, bTopStrong, 'left', 'center'), // 23 matrixFirst
+    xf(fBody, fillCard, bTopHair, 'left', 'center'), // 24 matrixMid
+    xf(fBody, fillCard, bTopHair, 'left', 'center'), // 25 matrixLast
+    xf(fBody, 0, bTopHair, 'left', 'center'), // 26 legendText
+    xf(fBody, 0, bDisclaimer, 'left', 'center'), // 27 disclaimer
+    xf(fBodyBold, fillCard, bTopStrong, 'left', 'center', false), // 28 subtotalSummary
   ];
   out = out.replace(cellXfsSection[0], `<cellXfs count="${xfsCount + newXfs.length}">${cellXfsSection[2]}${newXfs.join('')}</cellXfs>`);
 
@@ -1403,7 +1507,14 @@ function buildStyledSheetXml(rows: SheetRow[], colWidths: number[], ids: ReportS
       merges.push(`<mergeCell ref="${colLetter(row.mergeFrom)}${r}:${lastCol}${r}"/>`);
     }
 
-    const cells = row.cells.map((val, ci) => {
+    // Emite uma célula por COLUNA REAL da planilha (0..numCols-1), não só até onde `row.cells`
+    // tem conteúdo — uma linha mesclada (ex.: título/seção/rótulo) só declarava `<c>` até a
+    // coluna do texto; as colunas seguintes, sem nenhuma célula própria nessa linha, ficavam sem
+    // borda/preenchimento, então o traço/caixa aparecia fechando só uma fração da largura real
+    // (borda "incompleta"). Preenchendo todas as colunas, a borda passa a fechar por completo.
+    const cellCount = Math.max(row.cells.length, numCols);
+    const cells = Array.from({ length: cellCount }, (_, ci) => {
+      const val = row.cells[ci] ?? null;
       const ref = `${colLetter(ci)}${r}`;
       const s = row.cellStyleOverride?.[ci] ?? styleFor(ci);
       if (val === null || val === undefined || val === '') return `<c r="${ref}" s="${s}"/>`;
@@ -1412,17 +1523,32 @@ function buildStyledSheetXml(rows: SheetRow[], colWidths: number[], ids: ReportS
       return `<c r="${ref}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${escaped}</t></is></c>`;
     }).join('');
 
-    // Altura de linha escala com o maior texto — linhas mescladas usam a largura real do
-    // intervalo mesclado (não a largura total da planilha), senão a altura fica superestimada.
+    // Altura de linha escala com o texto de CADA célula usando a largura REAL de onde ela
+    // renderiza — célula dentro do intervalo mesclado usa a largura do intervalo todo, célula
+    // fora dele usa só a largura da própria coluna (ex.: "Processo Elementar", coluna C sozinha,
+    // bem mais estreita que o card de "Justificativa de Negócio" mesclado D:K — estimar as duas
+    // pela largura do card subestimava a altura necessária pra coluna estreita). Fator reduzido
+    // (0.75, não 1:1): largura de coluna do Excel não equivale a nº de caracteres pra qualquer
+    // fonte/peso (negrito ocupa mais) — superestimar caracteres por linha cortava o texto
+    // (alinhado ao topo, cortava o fim; antes, centralizado, cortava os dois lados).
     const mergedWidth = row.mergeFrom !== undefined
       ? colWidths.slice(row.mergeFrom).reduce((a, b) => a + b, 0)
       : null;
-    const charsPerLine = mergedWidth ? Math.round(mergedWidth * 0.95) : 70;
-    const longest = row.cells.reduce((acc: string, v) => typeof v === 'string' && v.length > acc.length ? v : acc, '');
-    const lines = estimateWrappedLines(longest, charsPerLine);
+    const lines = row.cells.reduce((maxLines: number, val, ci) => {
+      if (typeof val !== 'string' || !val) return maxLines;
+      const cellWidth = (mergedWidth !== null && row.mergeFrom !== undefined && ci >= row.mergeFrom)
+        ? mergedWidth
+        : (colWidths[ci] ?? 55);
+      const charsPerLine = Math.max(1, Math.round(cellWidth * 0.75));
+      return Math.max(maxLines, estimateWrappedLinesMultiline(val, charsPerLine));
+    }, 1);
+    // Teto real do Excel pra altura de uma única linha é ~409pt (limite da UI) — usar um teto
+    // bem menor (250) cortava visualmente textos longos (ex.: solicitação compilada de várias
+    // entrevistas) no meio da frase, sem nenhum aviso pro usuário de que faltava conteúdo.
     const heightAttr = row.height
       ? ` ht="${row.height}" customHeight="1"`
-      : lines > 1 ? ` ht="${Math.min(lines * 14, 250)}" customHeight="1"` : '';
+      : lines > 1 ? ` ht="${Math.min(lines * 14, 409)}" customHeight="1"` : '';
+
 
     return `<row r="${r}"${heightAttr}>${cells}</row>`;
   }).join('');
@@ -1473,8 +1599,12 @@ function buildMemoriaCalculoRows(
   ];
   campos.forEach(([label, texto], idx) => {
     // Chip (coluna C) + card (D:K mesclado) NA MESMA linha — layout lado a lado fiel ao modelo.
+    // Altura NÃO é fixa — "O que foi solicitado" pode ser bem mais longo que os demais campos
+    // (compila descrição do chamado + comentários da PATi no DevOps), então cada campo precisa
+    // da própria altura calculada a partir do próprio texto (buildStyledSheetXml faz isso
+    // automaticamente quando `height` não é informado).
     const cells: (string | number | null)[] = [null, null, label, sanitizeForDocument(texto) || 'Síntese não disponível para esta versão.'];
-    rows.push({ cells, band: 'field', mergeFrom: 3, height: 58, pos: idx === 0 ? 'first' : 'mid' });
+    rows.push({ cells, band: 'field', mergeFrom: 3, pos: idx === 0 ? 'first' : 'mid' });
   });
   rows.push({ cells: [], height: 12 });
 
@@ -1585,39 +1715,46 @@ async function getApfVersionHistory(workItemId: number): Promise<ApfVersionEntry
   }));
 }
 
-/** Compila "O QUE FOI SOLICITADO" de forma DETERMINÍSTICA (nunca só a paráfrase da LLM, que
- * pode perder fidelidade ao longo de várias refinagens): pedido inicial + um "Complemento" por
- * refinamento subsequente, cada um usando o InterviewContext REAL daquela versão (a instrução
- * literal que o analista deu à PATi). `historicoAnterior` já deve vir filtrado só com versões
- * anteriores à que está sendo renderizada. `askAtual` é o pedido/instrução da versão CORRENTE
- * (ainda não gravada em DocumentVersionHistory no momento da geração ao vivo). */
-function buildSolicitacaoCompilada(
-  historicoAnterior: ApfVersionEntry[], sinteseAtual: SintesePati, askAtual?: string | null,
-): string {
+/** Trunca um texto num limite seguro de caracteres pra sempre caber numa única linha da planilha
+ * (Excel tem um teto real de ~409pt de altura por linha — um texto grande demais nunca renderiza
+ * por completo, não importa a altura configurada). Corta em um espaço (nunca no meio de uma
+ * palavra) e adiciona uma nota indicando onde ver o conteúdo completo. */
+function truncateForSheet(text: string, maxChars: number, whereToSeeMore: string): string {
+  if (text.length <= maxChars) return text;
+  const cut = text.lastIndexOf(' ', maxChars);
+  const base = text.slice(0, cut > 0 ? cut : maxChars);
+  return `${base}… (texto completo em: ${whereToSeeMore})`;
+}
+
+/** Compila "O QUE FOI SOLICITADO" a partir do que o CLIENTE pediu no chamado — descrição do
+ * chamado (`wi.Description`) + comentários da PATi/analista no DevOps (`wi.DiscussionPati`) —,
+ * nunca a conversa de entrevista com a PATi (isso é a negociação de DETALHES pra fechar a
+ * contagem, não o pedido em si; já fica registrado à parte na Auditoria da Comunicação). Cada
+ * refinamento posterior soma um resumo curto (a síntese já sintetizada daquela versão, não o
+ * transcript bruto). `historicoAnterior` já deve vir filtrado só com versões anteriores à que
+ * está sendo renderizada. */
+function buildSolicitacaoCompilada(wi: any, historicoAnterior: ApfVersionEntry[], sinteseAtual: SintesePati): string {
   const fmtData = (d: Date) => new Date(d).toLocaleDateString('pt-BR');
   const partes: string[] = [];
 
-  if (historicoAnterior.length === 0) {
-    // Primeira geração — não há o que compilar ainda, o pedido inicial É o que a LLM sintetizou
-    // a partir da descrição/discussão original do chamado.
-    partes.push(sanitizeForDocument(askAtual) || sanitizeForDocument(sinteseAtual.oQueFoiPedido) || 'Não informado.');
-  } else {
-    const primeira = historicoAnterior[0];
-    const sinteseInicial = parseSintese(primeira.resumoAnalise);
-    const pedidoInicial = sanitizeForDocument(primeira.interviewContext) || sanitizeForDocument(sinteseInicial?.oQueFoiPedido) || 'Não informado.';
-    partes.push(`Solicitação inicial (v${primeira.versao}, ${fmtData(primeira.criadoEm)}): ${pedidoInicial}`);
-    for (const v of historicoAnterior.slice(1)) {
-      const texto = sanitizeForDocument(v.interviewContext);
-      if (!texto) continue;
-      partes.push(`Complemento (v${v.versao}, ${fmtData(v.criadoEm)}): ${texto}`);
-    }
-    const complementoAtual = sanitizeForDocument(askAtual);
-    if (complementoAtual) partes.push(`Complemento mais recente: ${complementoAtual}`);
+  const pedidoOriginal = [sanitizeForDocument(wi.Description), sanitizeForDocument(wi.DiscussionPati)]
+    .filter(Boolean).join(' ') || sanitizeForDocument(sinteseAtual.oQueFoiPedido) || 'Não informado.';
+  partes.push(pedidoOriginal);
+
+  for (const v of historicoAnterior) {
+    const sinteseV = parseSintese(v.resumoAnalise);
+    const texto = sanitizeForDocument(sinteseV?.oQueFoiPedido);
+    if (!texto) continue;
+    partes.push(`Ajuste solicitado (v${v.versao}, ${fmtData(v.criadoEm)}): ${texto}`);
   }
-  return partes.join('\n\n');
+
+  // Trunca o COMPILADO FINAL (descrição/discussão do chamado + ajustes de cada refinamento) —
+  // garante que o texto sempre caiba na altura máxima real de uma linha do Excel (~409pt),
+  // mesmo quando o chamado tem uma descrição/discussão [PATI] muito extensa.
+  return truncateForSheet(partes.join('\n\n'), 1900, 'descrição/comentários do chamado no Azure DevOps');
 }
 
-export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParametros, sintese: SintesePati, opts: { versaoOverride?: number; askAtual?: string | null } = {}): Promise<Buffer> {
+export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParametros, sintese: SintesePati, opts: { versaoOverride?: number; askAtual?: string | null; geradoPorNome?: string | null } = {}): Promise<Buffer> {
   // __dirname é dist/services (build) ou src/services (dev via tsx) — em ambos os casos
   // subir 2 níveis chega na raiz do app (sibling de dist/src), onde templates/ deve existir
   // (NÃO dentro de dist/templates — copy-assets copia lá também, mas esse caminho não é usado).
@@ -1625,13 +1762,40 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   const templateBuf = readFileSync(templatePath);
   const zip = await JSZip.loadAsync(templateBuf);
 
-  // Estilos originais de D,E,F,G,H,I,J,K,L,M,N,O,P,Q não têm vertical="center" (ficam no rodapé
+  // Histórico de versões já gravadas (NUNCA inclui a versão sendo renderizada agora — o INSERT
+  // acontece depois, no chamador) — usado pra preencher Criação/Revisor/Revisão da caixa de
+  // identificação (linhas 8-9). `isLive` = geração ao vivo (a versão atual ainda não existe em
+  // DocumentVersionHistory); re-render de uma versão histórica específica usa versaoOverride.
+  const historicoCompleto = await getApfVersionHistory(wi.Id);
+  const versaoAtual = opts.versaoOverride ?? await nextVersion(wi.Id, 'APF');
+  const isLive = opts.versaoOverride === undefined;
+  const primeiraVersao = historicoCompleto[0] ?? null;
+  const dataCriacao = primeiraVersao ? new Date(primeiraVersao.criadoEm) : new Date();
+  const versaoAtualEntry = historicoCompleto.find(v => v.versao === versaoAtual) ?? null;
+  const dataRevisao = isLive
+    ? (historicoCompleto.length > 0 ? new Date() : null) // gerando agora, já havia versão(ões) anterior(es) → isto é uma revisão
+    : (versaoAtual > 1 && versaoAtualEntry ? new Date(versaoAtualEntry.criadoEm) : null);
+  const revisorNome = isLive ? (opts.geradoPorNome || null) : (versaoAtualEntry?.geradoPorNome || null);
+
+  // Estilos originais de D,E,F,G,H,I,J,K,L,M não têm vertical="center" (ficam no rodapé
   // da linha quando ela cresce por texto longo). Clonamos aqui, cedo, pra ter os novos índices
   // disponíveis ao processar sheet2 mais abaixo; a seção de DXF (mais abaixo) reusa essa mesma
   // variável `styles`, sem recarregar do zip.
   let styles = await zip.file('xl/styles.xml')!.async('string');
-  const { stylesXml: stylesWithVCenter, indexMap: vCenter } = cloneCellXfsWithVerticalCenter(styles, [2, 83, 120, 71, 3, 81, 82, 84, 85]);
+  const { stylesXml: stylesWithVCenter, indexMap: vCenter } = cloneCellXfsWithVerticalCenter(styles, [2, 83, 120, 71, 3, 81, 82, 84]);
   styles = stylesWithVCenter;
+  // N,O,P,Q (Horas Desenv./An.Teste/Teste) usam no template original o estilo 85, que é
+  // horizontal="right" (herdado de uma célula de valor monetário) — clonar só com vertical=
+  // center (como acima) deixava essas colunas verticalmente centradas mas ainda encostadas à
+  // direita, nunca centralizadas como as colunas vizinhas. Aqui forçamos os dois eixos.
+  const { stylesXml: stylesWithForceCenter, indexMap: forceCenter } = cloneCellXfsForceCenter(styles, [85]);
+  styles = stylesWithForceCenter;
+  // AE40 ("DESCRIÇÃO DA CUSTOMIZAÇÃO") usa no template original o estilo 139, horizontal=
+  // "justify" — pensado pra parágrafo corrido, mas aplicado também ao rótulo em negrito de uma
+  // linha só (única célula da caixa), o "justify" espalhava as 3 palavras do título pra
+  // preencher a largura toda, com espaçamento gigante entre elas. Clone "left" resolve.
+  const { stylesXml: stylesWithLeftAlign, indexMap: leftAlign } = cloneCellXfsWithHorizontal(styles, [139], 'left');
+  styles = stylesWithLeftAlign;
 
   // ─── Read shared strings to add new text values properly ───
   let sharedStringsXml = await zip.file('xl/sharedStrings.xml')!.async('string');
@@ -1651,6 +1815,11 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   sheet1 = setCellValue(sheet1, 'G6', aplicacaoLabel, newStrings, existingCount);
   sheet1 = setCellValue(sheet1, 'G7', `#${wi.Id} - ${wi.Title}`, newStrings, existingCount);
   sheet1 = setCellValue(sheet1, 'G8', 'PATi - Geração Automática', newStrings, existingCount);
+  // Criação (data da 1ª versão) / Revisor (analista responsável pela versão atual, nome
+  // completo — nunca e-mail) / Revisão (data da versão atual, só quando já existe revisão).
+  sheet1 = setCellValue(sheet1, 'Y8', dataCriacao.toLocaleDateString('pt-BR'), newStrings, existingCount);
+  sheet1 = setCellValue(sheet1, 'G9', revisorNome || 'PATi - Geração Automática', newStrings, existingCount);
+  if (dataRevisao) sheet1 = setCellValue(sheet1, 'Y9', dataRevisao.toLocaleDateString('pt-BR'), newStrings, existingCount);
 
   // Deflatores
   sheet1 = setCellValue(sheet1, 'V12', params.DeflatorInclusao);
@@ -1668,8 +1837,29 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   sheet1 = setCellValue(sheet1, 'V30', params.CicloExecucaoTestes / 100);
   sheet1 = setCellValue(sheet1, 'V31', params.CicloHomologacao / 100);
 
-  // Propósito
-  sheet1 = setCellValue(sheet1, 'B35', `Análise de Pontos de Função para o chamado #${wi.Id} - ${wi.Title}. Gerado automaticamente por PATi em ${new Date().toLocaleDateString('pt-BR')}.`, newStrings, existingCount);
+  // Propósito — antes era só uma frase genérica ("Análise de Pontos de Função para o chamado
+  // X, gerado por PATi"); agora reflete de fato o que foi pedido/entendido e o resultado da
+  // contagem, pra quem só abre esta aba entender o motivo do documento sem ler mais nada.
+  const propositoPartes = [
+    `Análise de Pontos de Função referente ao chamado #${wi.Id} - ${wi.Title}, do cliente ${wi.ClienteNome || 'N/A'} (${aplicacaoLabel}).`,
+  ];
+  if (sanitizeForDocument(sintese?.oQueFoiPedido)) propositoPartes.push(`Solicitação: ${sanitizeForDocument(sintese.oQueFoiPedido)}`);
+  if (sanitizeForDocument(sintese?.oQueFoiEntendido)) propositoPartes.push(`Entendimento: ${sanitizeForDocument(sintese.oQueFoiEntendido)}`);
+  propositoPartes.push(`Contagem totalizando ${apf.totalPF} PF (${apf.totalPFA} PF ajustados), estimadas ${apf.totalHoras} horas. Gerado automaticamente por PATi em ${new Date().toLocaleDateString('pt-BR')}${revisorNome ? `, com curadoria de ${revisorNome}` : ''}.`);
+  sheet1 = setCellValue(sheet1, 'B35', propositoPartes.join(' '), newStrings, existingCount);
+
+  // Descrição da customização — a célula do template só tinha o rótulo "DESCRIÇÃO DA
+  // CUSTOMIZAÇÃO" fixo, sem nenhum conteúdo real (caixa sempre vazia). Mantém o rótulo em
+  // negrito (primeira linha) e acrescenta a descrição real em peso normal logo abaixo — a
+  // caixa não tem uma célula de valor separada da de rótulo, por isso usa rich text numa
+  // célula só, em vez do padrão rótulo/valor usado no restante da aba.
+  const descricaoCustomizacao = sanitizeForDocument(sintese?.oQueFoiProjetado)
+    || sanitizeForDocument(sintese?.motivoContagem)
+    || 'Nenhuma descrição de customização disponível para esta versão.';
+  sheet1 = setCellRichText(sheet1, 'AE40', [
+    { bold: true, text: 'DESCRIÇÃO DA CUSTOMIZAÇÃO\n\n' },
+    { bold: false, text: descricaoCustomizacao },
+  ], leftAlign[139]);
 
   // Remove cached formula values in Contagem to force recalculation
   const formulaCachePattern = /(<c r="[^"]*"[^>]*>(?:<f[^>]*>.*?<\/f>|<f[^/]*\/>))<v>[^<]*<\/v>/g;
@@ -1729,7 +1919,7 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   const colunasParaCentralizar: Record<string, number> = {
     E: vCenter[2], F: vCenter[83], G: vCenter[120], H: vCenter[71],
     I: vCenter[3], J: vCenter[3], K: vCenter[81], L: vCenter[82],
-    M: vCenter[84], N: vCenter[85], O: vCenter[85], P: vCenter[85], Q: vCenter[85],
+    M: vCenter[84], N: forceCenter[85], O: forceCenter[85], P: forceCenter[85], Q: forceCenter[85],
   };
   for (const [col, styleId] of Object.entries(colunasParaCentralizar)) {
     for (let r = 11; r <= 20; r++) {
@@ -1743,6 +1933,19 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // Include header rows (6-9) that have SUM(Table3[...]) formulas + data/total rows
   const sheet2FormulaCache = /(<c r="[^"]*"[^>]*>(?:<f[^>]*>.*?<\/f>|<f[^/]*\/>))<v>[^<]*<\/v>/g;
   sheet2 = sheet2.replace(sheet2FormulaCache, '$1');
+
+  // Coluna R ("User Story (ID)"/TFS) nunca teve fórmula nem é preenchida pelo gerador — fica
+  // sempre vazia e sem uso real. Ocultar em vez de excluir: a coluna faz parte da Table3
+  // estruturada (fórmulas de outras colunas referenciam por nome, não por letra), então excluí-la
+  // de verdade exigiria renumerar todas as colunas seguintes (S..AG) e seria arriscado no modelo
+  // "blindado"; ocultar tem o mesmo efeito visual (deixa de aparecer) sem esse risco.
+  if (/<cols>/.test(sheet2)) {
+    sheet2 = /<col min="18" max="18"[^>]*\/>/.test(sheet2)
+      ? sheet2.replace(/<col min="18" max="18"([^>]*)\/>/, (m, attrs) => attrs.includes('hidden=')
+          ? m
+          : `<col min="18" max="18"${attrs} hidden="1"/>`)
+      : sheet2.replace('<cols>', '<cols><col min="18" max="18" width="9" hidden="1" customWidth="1"/>');
+  }
 
   zip.file('xl/worksheets/sheet2.xml', sheet2);
 
@@ -1853,12 +2056,12 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // sendo renderizada agora — importante tanto pra geração ao vivo (a versão atual ainda não
   // foi gravada em DocumentVersionHistory neste ponto, o INSERT acontece depois no chamador)
   // quanto pro re-render de uma versão histórica antiga (não deve "ver" versões futuras).
-  const historicoTodo = await getApfVersionHistory(wi.Id);
-  const versaoAtual = opts.versaoOverride ?? await nextVersion(wi.Id, 'APF');
-  const historicoAnterior = historicoTodo.filter(v => v.versao < versaoAtual);
+  // `historicoCompleto`/`versaoAtual` já calculados no topo da função (usados também pela
+  // caixa de identificação Criação/Revisor/Revisão da aba Contagem).
+  const historicoAnterior = historicoCompleto.filter(v => v.versao < versaoAtual);
   const ultimaVersao = historicoAnterior[historicoAnterior.length - 1];
   const elaboradoPor = ultimaVersao?.geradoPorNome || null;
-  const solicitacaoCompilada = buildSolicitacaoCompilada(historicoAnterior, sintese, opts.askAtual);
+  const solicitacaoCompilada = buildSolicitacaoCompilada(wi, historicoAnterior, sintese);
 
   const memoriaRows = buildMemoriaCalculoRows(wi, apf, params, sintese, elaboradoPor, versaoAtual, reportStyleIds, solicitacaoCompilada);
   // Grade fiel ao modelo aprovado: A=margem esquerda, B=Nº, C=Processo (larga), D..K=demais
