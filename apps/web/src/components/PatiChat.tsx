@@ -24,6 +24,20 @@ function formatHoraComMs(iso: string): string {
   return `${d.toLocaleTimeString('pt-BR')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
 }
 
+type InterviewState = { active: boolean; workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean };
+
+// Entrevista em andamento só vivia em estado do React — um refresh acidental da página (ou
+// a aba fechando) perdia TODAS as respostas já dadas, mesmo sem nenhuma falha de geração
+// envolvida. Persistir em sessionStorage (sobrevive a refresh, some ao fechar a aba — nunca
+// vaza pra outra sessão/usuário) dá uma rede de segurança adicional.
+const INTERVIEW_STORAGE_KEY = 'pati_interview_state';
+function loadStoredInterview(): InterviewState | null {
+  try {
+    const raw = sessionStorage.getItem(INTERVIEW_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
 const SUGGESTIONS = [
   'Resumo geral do painel',
   'Qual cliente tem mais chamados?',
@@ -144,14 +158,24 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(() => localStorage.getItem('pati_chat_expanded') === '1');
   const [chatProviderLabel, setChatProviderLabel] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Olá! Sou a **PATi**, sua agente de suporte. Pergunte sobre os dados do painel ou peça para classificar chamados! 🐝' },
-  ]);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const base: Message[] = [
+      { role: 'assistant', content: 'Olá! Sou a **PATi**, sua agente de suporte. Pergunte sobre os dados do painel ou peça para classificar chamados! 🐝' },
+    ];
+    const restored = loadStoredInterview();
+    if (restored?.history?.length) {
+      base.push({ role: 'assistant', content: '🔄 Retomando a entrevista de onde paramos — suas respostas anteriores foram preservadas.' });
+      for (const turno of restored.history) {
+        base.push({ role: turno.role === 'user' ? 'user' : 'assistant', content: turno.content });
+      }
+    }
+    return base;
+  });
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState<{ pct: number; current: number; total: number } | null>(null);
-  const [interview, setInterview] = useState<{ active: boolean; workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean } | null>(null);
+  const [interview, setInterview] = useState<InterviewState | null>(() => loadStoredInterview());
   const [pendingDocTipo, setPendingDocTipo] = useState<'APF' | 'SPEC' | 'AMBOS' | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
@@ -164,6 +188,14 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, []);
 
   useEffect(() => { scrollToBottom(); }, [messages, status, scrollToBottom]);
+  // Mantém a entrevista salva em sessionStorage sempre atualizada — some junto quando a
+  // entrevista é encerrada/concluída (interview === null) ou some sozinho ao fechar a aba.
+  useEffect(() => {
+    try {
+      if (interview) sessionStorage.setItem(INTERVIEW_STORAGE_KEY, JSON.stringify(interview));
+      else sessionStorage.removeItem(INTERVIEW_STORAGE_KEY);
+    } catch { /* sessionStorage indisponível/cheio — não é crítico, só perde a rede de segurança */ }
+  }, [interview]);
   useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
   useEffect(() => { localStorage.setItem('pati_chat_expanded', expanded ? '1' : '0'); }, [expanded]);
 
@@ -365,6 +397,12 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       let buffer = '';
       let generated = 0;
       let totalSteps = 0;
+      // Nem toda falha vira exceção — o stream SSE pode completar normalmente (res.ok, sem
+      // throw) mesmo quando a geração de UM item falhou (ex.: LLM devolveu resposta vazia).
+      // Sem rastrear isso, a função sempre retornava sucesso ao chegar no fim do stream, o
+      // chamador limpava a entrevista, e a resposta da PATi vinha vazia/com erro — perdendo a
+      // entrevista inteira mesmo sem nenhuma exceção de rede ter acontecido.
+      let hadError = false;
 
       const updateLastMsg = (content: string) => {
         setMessages(prev => {
@@ -409,9 +447,11 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
               setStatus(`✨ #${data.id} ${data.step}${detail}`);
               updateLastMsg(`🔄 Gerando... **${data.current}/${data.total}** (${data.pct}%)\n\nÚltimo: #${data.id} ${data.step}${detail}`);
             } else if (data.type === 'error') {
+              hadError = true;
               setStatus(`❌ #${data.id} ${data.step}: ${data.message}`);
             } else if (data.type === 'done') {
               setProgress(null);
+              if (data.errors > 0) hadError = true;
 
               // When nothing was generated, show a helpful message
               if (data.generated === 0 && data.total === 0) {
@@ -442,6 +482,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
                     lines.push(detail);
                   }
                 }
+                // Erro real (não exceção de rede) — a entrevista NÃO é limpa pelo chamador
+                // nesse caso (ver `hadError`/return), então avisa que dá pra só tentar de novo.
+                if (data.errors > 0) lines.push('\n💡 Suas respostas da entrevista não foram perdidas — pode tentar novamente dizendo "sim".');
 
                 updateLastMsg(lines.join('\n'));
               }
@@ -450,7 +493,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           } catch { /* skip malformed SSE line */ }
         }
       }
-      return true;
+      return !hadError;
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         setMessages(prev => [...prev, { role: 'assistant', content: '❌ Erro ao conectar com o serviço de geração de documentos. Suas respostas da entrevista NÃO foram perdidas — pode tentar novamente dizendo "sim".' }]);
