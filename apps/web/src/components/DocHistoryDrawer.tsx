@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchDocVersions, downloadDocument, API_BASE } from '../services/api';
+import { fetchDocVersions, downloadDocument, getAuditoriaPdfUrl, API_BASE } from '../services/api';
 import UserAvatar from './UserAvatar';
 
 interface DocVersion {
@@ -97,6 +97,18 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
               <div key={label} className="mb-5">
                 <p className="text-[11px] font-semibold text-txt-2 uppercase tracking-wide mb-2 flex items-center gap-1.5">
                   <span>{icon}</span>{label} · {items.length} {items.length !== 1 ? 'versões' : 'versão'}
+                  {label === 'APF' && (
+                    <button
+                      onClick={e => { e.stopPropagation(); downloadDocument(getAuditoriaPdfUrl(workItemId), `auditoria-apf-${workItemId}.pdf`).catch(err => alert(err.message)); }}
+                      title="Baixar Auditoria da Comunicação (PDF) — trilha completa, sempre atualizada"
+                      className="ml-auto flex items-center gap-1 text-[10px] normal-case font-medium text-[#b45309] hover:text-[#92400e] cursor-pointer"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                      </svg>
+                      Auditoria (PDF)
+                    </button>
+                  )}
                 </p>
                 <div className="space-y-2">
                   {items.map((v, i) => (
@@ -118,27 +130,30 @@ export default function DocHistoryDrawer({ workItemId, title, onClose }: Props) 
                           )}
                         </div>
                         <div className="flex items-center gap-2">
-                          {/* Download links */}
-                          <button
-                            onClick={e => { e.stopPropagation(); const ext = v.Tipo === 'SPEC_DOCX' ? 'docx' : 'pdf'; downloadDocument(`${API_BASE}/documents/${workItemId}/versions/${v.Id}/download`, `${v.Tipo.toLowerCase()}-${workItemId}-v${v.Versao}.${ext}`).catch(err => alert(err.message)); }}
-                            title={`Baixar ${v.Tipo} v${v.Versao} (${v.Tipo === 'SPEC_DOCX' ? 'Word' : 'PDF'})`}
-                            className="flex items-center gap-1 text-[11px] text-[#1d4ed8] hover:text-[#1e40af] font-medium cursor-pointer"
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                            </svg>
-                            {v.Tipo === 'SPEC_DOCX' ? 'DOCX' : 'PDF'}
-                          </button>
-                          {v.Tipo === 'APF' && (
+                          {/* Download links — APF só existe em Excel hoje (PDF removido: a
+                              memória de cálculo e a trilha de auditoria que antes só existiam
+                              no PDF agora vêm em abas dedicadas do próprio Excel). */}
+                          {v.Tipo === 'APF' ? (
                             <button
-                              onClick={e => { e.stopPropagation(); downloadDocument(`${API_BASE}/documents/${workItemId}/versions/${v.Id}/download?format=excel`, `apf-${workItemId}-v${v.Versao}.xlsx`).catch(err => alert(err.message)); }}
+                              onClick={e => { e.stopPropagation(); downloadDocument(`${API_BASE}/documents/${workItemId}/versions/${v.Id}/download`, `apf-${workItemId}-v${v.Versao}.xlsx`).catch(err => alert(err.message)); }}
                               title={`Baixar APF v${v.Versao} (Excel)`}
                               className="flex items-center gap-1 text-[11px] text-[#16a34a] hover:text-[#166534] font-medium cursor-pointer"
                             >
                               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
                               </svg>
-                              XLS
+                              XLSX
+                            </button>
+                          ) : (
+                            <button
+                              onClick={e => { e.stopPropagation(); const ext = v.Tipo === 'SPEC_DOCX' ? 'docx' : 'pdf'; downloadDocument(`${API_BASE}/documents/${workItemId}/versions/${v.Id}/download`, `${v.Tipo.toLowerCase()}-${workItemId}-v${v.Versao}.${ext}`).catch(err => alert(err.message)); }}
+                              title={`Baixar ${v.Tipo} v${v.Versao} (${v.Tipo === 'SPEC_DOCX' ? 'Word' : 'PDF'})`}
+                              className="flex items-center gap-1 text-[11px] text-[#1d4ed8] hover:text-[#1e40af] font-medium cursor-pointer"
+                            >
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                              </svg>
+                              {v.Tipo === 'SPEC_DOCX' ? 'DOCX' : 'PDF'}
                             </button>
                           )}
                           <span className="text-[11px] text-txt-3 shrink-0">{fmtDate(v.CriadoEm)}</span>

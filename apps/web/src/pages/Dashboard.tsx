@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { fetchWorkItems, fetchWorkItem, fetchKpis, fetchFilters, fetchCharts, updateWorkItem, getDocDownloadUrl, downloadDocument, fetchDocStatus, fetchDocVersions, fetchSyncLast, cancelSync, API_BASE } from '../services/api';
+import { fetchWorkItems, fetchWorkItem, fetchKpis, fetchFilters, fetchCharts, updateWorkItem, getDocDownloadUrl, getAuditoriaPdfUrl, downloadDocument, fetchDocStatus, fetchDocVersions, fetchSyncLast, cancelSync, API_BASE } from '../services/api';
 import { getAccessToken } from '../auth/authFetch';
 import { useCurrentUser } from '../auth/RoleContext';
 import PatiChat from '../components/PatiChat';
@@ -7,6 +7,7 @@ import PatiSprite from '../components/PatiSprite';
 import DocHistoryDrawer from '../components/DocHistoryDrawer';
 import MultiSelect from '../components/MultiSelect';
 import WorkItemModal from '../components/WorkItemModal';
+import { getDevOpsWorkItemUrl } from '../utils/devops';
 import type { WorkItem, Kpis, FilterOptions } from '../types';
 import {
   Chart as ChartJS,
@@ -90,7 +91,7 @@ function fmt(value: string | null | undefined): string {
 interface ItemsCache {
   key: string; ts: number;
   items: WorkItem[]; // full dataset for current dimension filters
-  docStatus: Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>;
+  docStatus: Record<number, { apfExcel: boolean; spec: boolean; specDocx: boolean }>;
 }
 // KPI/Chart cache (only reacts to dimension filters, NOT search/page)
 interface KpiChartCache {
@@ -162,7 +163,7 @@ export default function Dashboard() {
   const [auditItem, setAuditItem] = useState<{ id: number; title: string } | null>(null);
 
   // Document status for all items
-  const [docStatus, setDocStatus] = useState<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>>(_initDocStatus);
+  const [docStatus, setDocStatus] = useState<Record<number, { apfExcel: boolean; spec: boolean; specDocx: boolean }>>(_initDocStatus);
 
   // ── Client-side search + pagination (ZERO network calls) ──────────────
   const filteredItems = useMemo(() => {
@@ -225,7 +226,7 @@ export default function Dashboard() {
       // Fetch doc status for all items in background
       const ids = (itemsData.items as WorkItem[]).map(i => i.Id);
       fetchDocStatus(ids).then(ds => {
-        setDocStatus(ds as Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>);
+        setDocStatus(ds as Record<number, { apfExcel: boolean; spec: boolean; specDocx: boolean }>);
         const nc: ItemsCache = { key, ts: Date.now(), items: itemsData.items, docStatus: ds as any };
         _itemsCache = nc; writeSSCache(nc);
       }).catch(() => {
@@ -780,19 +781,19 @@ export default function Dashboard() {
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2b579a" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><text x="7" y="18" fontSize="7" fontWeight="bold" stroke="none" fill="#2b579a">W</text></svg>
                           </button>
                         )}
-                        {docStatus[item.Id]?.apf && (
-                          <button onClick={e => { e.stopPropagation(); downloadDocument(getDocDownloadUrl(item.Id, 'APF'), `apf-${item.Id}.pdf`).catch(err => alert(err.message)); }} title="Baixar APF (PDF)"
-                            className="inline-flex items-center justify-center w-7 h-7 rounded bg-[#fff7ed] border border-[#fed7aa] hover:bg-[#fed7aa] transition-colors cursor-pointer">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#E8661B" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9,15 12,18 15,15"/></svg>
-                          </button>
-                        )}
                         {docStatus[item.Id]?.apfExcel && (
                           <button onClick={e => { e.stopPropagation(); downloadDocument(getDocDownloadUrl(item.Id, 'APF_EXCEL'), `apf-${item.Id}.xlsx`).catch(err => alert(err.message)); }} title="Baixar APF (Excel)"
                             className="inline-flex items-center justify-center w-7 h-7 rounded bg-[#ecfdf5] border border-[#a7f3d0] hover:bg-[#a7f3d0] transition-colors cursor-pointer">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><path d="M8 13l2.5 3L8 19M16 13l-2.5 3L16 19"/></svg>
                           </button>
                         )}
-                        {!docStatus[item.Id]?.spec && !docStatus[item.Id]?.specDocx && !docStatus[item.Id]?.apf && !docStatus[item.Id]?.apfExcel && (
+                        {docStatus[item.Id]?.apfExcel && (
+                          <button onClick={e => { e.stopPropagation(); downloadDocument(getAuditoriaPdfUrl(item.Id), `auditoria-apf-${item.Id}.pdf`).catch(err => alert(err.message)); }} title="Baixar Auditoria da Comunicação (PDF)"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded bg-[#fffbeb] border border-[#fde68a] hover:bg-[#fde68a] transition-colors cursor-pointer">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#b45309" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="18" x2="13" y2="18"/></svg>
+                          </button>
+                        )}
+                        {!docStatus[item.Id]?.spec && !docStatus[item.Id]?.specDocx && !docStatus[item.Id]?.apfExcel && (
                           <span className="text-txt-3 text-[11px]">—</span>
                         )}
                         <button
@@ -808,7 +809,7 @@ export default function Dashboard() {
                     </td>
                     <td className="px-[10px] py-[10px] max-[760px]:hidden">
                       <a
-                        href={`https://dev.azure.com/pbs-devops/SRM.wbc7srm/_workitems/edit/${item.Id}`}
+                        href={getDevOpsWorkItemUrl(item.Id, item.DevOpsAreaPath)}
                         target="_blank"
                         rel="noopener"
                         onClick={e => e.stopPropagation()}

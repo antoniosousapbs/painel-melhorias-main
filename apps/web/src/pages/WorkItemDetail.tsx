@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { fetchWorkItem, updateWorkItem, fetchAudit, fetchNextPriority } from '../services/api';
+import { getDevOpsWorkItemUrl } from '../utils/devops';
 import type { WorkItem } from '../types';
 
 type IconProps = { className?: string };
@@ -97,7 +98,7 @@ export default function WorkItemDetail() {
         </button>
         <span className="font-mono text-[12px] text-txt-3">#{item.Id}</span>
         <a
-          href={`https://dev.azure.com/pbs-devops/SRM.wbc7srm/_workitems/edit/${item.Id}`}
+          href={getDevOpsWorkItemUrl(item.Id, item.DevOpsAreaPath)}
           target="_blank"
           rel="noopener"
           className="inline-block px-[10px] py-1 text-[12px] font-medium text-accent bg-[#f0f6ff] border border-[#dbeafe] rounded-sm hover:bg-[#dbeafe] hover:border-[#93c5fd] transition-[background,border-color] duration-[120ms]"

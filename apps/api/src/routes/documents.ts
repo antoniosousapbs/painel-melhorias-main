@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getPool, sql } from '../db/connection.js';
-import { generateApf, generateSpec, generateSpecCompleta, getDocument, getDocumentStatus, getApfParametros, updateApfParametros, refineApf, getApfElements, getKnowledgeBase, addKnowledge, updateKnowledge, deleteKnowledge, generateApfPdf, generateApfExcel, generateSpecPdf, calculateApf, getApfDiretrizes, upsertApfDiretriz, nextVersion } from '../services/document-generator.js';
+import { generateApf, generateSpec, generateSpecCompleta, getDocument, getDocumentStatus, getApfParametros, updateApfParametros, refineApf, getApfElements, getKnowledgeBase, addKnowledge, updateKnowledge, deleteKnowledge, generateApfExcel, generateApfAuditoriaPdf, generateSpecPdf, calculateApf, getApfDiretrizes, upsertApfDiretriz, nextVersion, parseSintese } from '../services/document-generator.js';
 import { generateSpecDocx } from '../services/spec-docx-generator.js';
 import { getWorkItem, getProjectFilter } from '../services/workitem.js';
 import { interviewHistoryToText } from '../utils/context.js';
@@ -120,12 +120,12 @@ router.get('/:id/apf-elements', async (req, res) => {
   }
 });
 
-// GET /api/documents/:id/download/:tipo (APF, APF_EXCEL, SPEC ou SPEC_DOCX)
+// GET /api/documents/:id/download/:tipo (APF_EXCEL, SPEC ou SPEC_DOCX)
 router.get('/:id/download/:tipo', async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const tipo = req.params.tipo.toUpperCase();
-    if (!['APF', 'APF_EXCEL', 'SPEC', 'SPEC_DOCX'].includes(tipo)) return res.status(400).json({ error: 'Tipo deve ser APF, APF_EXCEL, SPEC ou SPEC_DOCX' });
+    if (!['APF_EXCEL', 'SPEC', 'SPEC_DOCX'].includes(tipo)) return res.status(400).json({ error: 'Tipo deve ser APF_EXCEL, SPEC ou SPEC_DOCX' });
 
     // Garante que o work item está dentro do escopo de projetos do usuário
     const workItem = await getWorkItem(id, (req as any).userProjects);
@@ -144,6 +144,26 @@ router.get('/:id/download/:tipo', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${doc.filename}"`);
     res.send(doc.buffer);
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/documents/:id/auditoria-pdf — trilha de auditoria completa (o que foi solicitado +
+// como foi interpretado, versão a versão) sempre gerada na hora (nunca salva), pra refletir o
+// histórico mais atual mesmo depois de refinamentos feitos após o último Excel gerado.
+router.get('/:id/auditoria-pdf', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
+    const workItem = await getWorkItem(id, (req as any).userProjects);
+    if (!workItem) return res.status(404).json({ error: 'Chamado não encontrado' });
+
+    const buffer = await generateApfAuditoriaPdf(id);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Auditoria_APF_${id}.pdf"`);
+    res.send(buffer);
+  } catch (err: any) {
+    console.error('Auditoria PDF error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -357,7 +377,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
     pf.bind(r);
     const result = await r.query(`
         SELECT w.Id, w.Title, w.ClienteNome,
-          CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'APF') THEN 1 ELSE 0 END as hasApf,
+          CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'APF_EXCEL') THEN 1 ELSE 0 END as hasApf,
           CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'SPEC') THEN 1 ELSE 0 END as hasSpec,
           CASE WHEN EXISTS(SELECT 1 FROM DocumentosGerados WHERE WorkItemId = w.Id AND Tipo = 'SPEC_DOCX') THEN 1 ELSE 0 END as hasSpecDocx
         FROM WorkItems w WHERE w.Id = @id ${pf.clause}
@@ -433,12 +453,13 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
             .input('horas', sql.Decimal(10, 2), result.apf.totalHoras)
             .input('elementos', sql.NVarChar(sql.MAX), JSON.stringify(result.apf.elementos))
             .input('ctx', sql.NVarChar(sql.MAX), interviewContext || null)
+            .input('resumo', sql.NVarChar(sql.MAX), JSON.stringify(result.sintese))
             .input('uid', sql.NVarChar(200), auditUser?.userId || null)
             .input('uname', sql.NVarChar(200), auditUser?.name || null)
             .input('uemail', sql.NVarChar(200), auditUser?.email || null)
             .query(`INSERT INTO DocumentVersionHistory
-              (WorkItemId,WorkItemTitle,Tipo,Versao,TotalPF,TotalHoras,ElementosJson,InterviewContext,GeradoPorUserId,GeradoPorNome,GeradoPorEmail)
-              VALUES (@wid,@wtitle,'APF',@versao,@pf,@horas,@elementos,@ctx,@uid,@uname,@uemail)`);
+              (WorkItemId,WorkItemTitle,Tipo,Versao,TotalPF,TotalHoras,ElementosJson,InterviewContext,ResumoAnalise,GeradoPorUserId,GeradoPorNome,GeradoPorEmail)
+              VALUES (@wid,@wtitle,'APF',@versao,@pf,@horas,@elementos,@ctx,@resumo,@uid,@uname,@uemail)`);
           // Stamp user on DocumentosGerados (current doc)
           if (auditUser) {
             await pool.request()
@@ -448,7 +469,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
               .input('uemail', sql.NVarChar(200), auditUser.email)
               .input('ctx', sql.NVarChar(sql.MAX), interviewContext || null)
               .query(`UPDATE DocumentosGerados SET GeradoPorUserId=@uid,GeradoPorNome=@uname,GeradoPorEmail=@uemail,InterviewContext=@ctx
-                      WHERE WorkItemId=@wid AND Tipo='APF'`);
+                      WHERE WorkItemId=@wid AND Tipo='APF_EXCEL'`);
           }
         } catch (auditErr: any) {
           console.warn('⚠️  Audit save failed (non-blocking):', auditErr.message);
@@ -747,13 +768,12 @@ router.get('/audit', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/documents/:id/versions/:versionId/download — regenera e baixa PDF/Excel de versão histórica
-// Query: ?format=pdf (default) | excel   — excel só disponível para APF
+// GET /api/documents/:id/versions/:versionId/download — regenera e baixa o documento de uma versão histórica
+// (APF sempre em Excel — PDF removido; SPEC em PDF; SPEC_DOCX em Word)
 router.get('/:id/versions/:versionId/download', async (req: Request, res: Response) => {
   try {
     const workItemId = parseInt(req.params.id);
     const versionId  = parseInt(req.params.versionId);
-    const format     = ((req.query.format as string) || 'pdf').toLowerCase();
     if (isNaN(workItemId) || isNaN(versionId)) return res.status(400).json({ error: 'IDs inválidos' });
 
     // Garante que o work item está dentro do escopo de projetos do usuário
@@ -782,15 +802,12 @@ router.get('/:id/versions/:versionId/download', async (req: Request, res: Respon
       const params = await getApfParametros();
       const apf = calculateApf(elementos, params);
 
-      if (format === 'excel') {
-        const buf = await generateApfExcel(wi, apf, params);
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename="APF_${workItemId}_v${version.Versao}.xlsx"`);
-        return res.send(buf);
-      }
-      const buf = await generateApfPdf(wi, apf, params);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="APF_${workItemId}_v${version.Versao}.pdf"`);
+      // PDF removido — Excel é o único formato de APF hoje. Reusa a síntese estruturada JÁ
+      // gravada nessa versão específica (não a mais recente) — é um snapshot histórico.
+      const sinteseSnapshot = parseSintese(version.ResumoAnalise) || { oQueFoiPedido: '', oQueFoiEntendido: '', oQueFoiProjetado: '', motivoContagem: '' };
+      const buf = await generateApfExcel(wi, apf, params, sinteseSnapshot, { versaoOverride: version.Versao, askAtual: version.InterviewContext });
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="APF_${workItemId}_v${version.Versao}.xlsx"`);
       return res.send(buf);
     }
 

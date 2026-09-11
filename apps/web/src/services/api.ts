@@ -137,8 +137,14 @@ export async function generateSpecDocxDoc(id: number) {
   return res.json();
 }
 
-export function getDocDownloadUrl(id: number, tipo: 'APF' | 'SPEC' | 'APF_EXCEL' | 'SPEC_DOCX') {
+export function getDocDownloadUrl(id: number, tipo: 'SPEC' | 'APF_EXCEL' | 'SPEC_DOCX') {
   return `${API_BASE}/documents/${id}/download/${tipo}`;
+}
+
+// Trilha de auditoria da APF — não é um Tipo salvo em DocumentosGerados, é sempre gerada na
+// hora a partir do histórico mais atual (por isso não usa o padrão /download/:tipo acima).
+export function getAuditoriaPdfUrl(id: number) {
+  return `${API_BASE}/documents/${id}/auditoria-pdf`;
 }
 
 /**
@@ -168,7 +174,7 @@ export async function downloadDocument(url: string, fallbackFilename: string) {
   URL.revokeObjectURL(objectUrl);
 }
 
-export async function fetchDocStatus(ids: number[]): Promise<Record<number, { apf: boolean; apfExcel: boolean; spec: boolean; specDocx: boolean }>> {
+export async function fetchDocStatus(ids: number[]): Promise<Record<number, { apfExcel: boolean; spec: boolean; specDocx: boolean }>> {
   if (ids.length === 0) return {};
   const res = await authFetch(`${API_BASE}/documents/status`, {
     method: 'POST',

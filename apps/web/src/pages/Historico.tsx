@@ -1,10 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
-import { fetchWorkItems, fetchFilters, fetchWorkItem } from '../services/api';
+import { fetchWorkItems, fetchFilters } from '../services/api';
 import MultiSelect from '../components/MultiSelect';
 import DocHistoryDrawer from '../components/DocHistoryDrawer';
-import WorkItemModal from '../components/WorkItemModal';
 import { STATUS_LABELS } from './Dashboard';
-import type { FilterOptions, WorkItem } from '../types';
+import { getDevOpsWorkItemUrl } from '../utils/devops';
+import type { FilterOptions } from '../types';
 
 interface HistoricoItem {
   Id: number;
@@ -16,6 +16,7 @@ interface HistoricoItem {
   SupportCaseStatus: string | null;
   EsforcoAPF: number | null;
   ChangedDate: string | null;
+  DevOpsAreaPath: string | null;
 }
 
 function fmtDate(iso: string | null) {
@@ -37,8 +38,6 @@ export default function Historico() {
   const [loading, setLoading] = useState(false);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [docDrawer, setDocDrawer] = useState<{ id: number; title: string } | null>(null);
-  const [selectedItem, setSelectedItem] = useState<WorkItem | null>(null);
-  const [openingId, setOpeningId] = useState<number | null>(null);
 
   // Mesmos filtros da página principal (Dashboard), escopados só ao conjunto do Histórico
   const [search, setSearch] = useState('');
@@ -73,18 +72,6 @@ export default function Historico() {
   }, [search, selClientes, selCategoria, selStatus, selResponsavel]);
 
   useEffect(() => { load(1); }, [load]);
-
-  const openReadOnly = async (id: number) => {
-    setOpeningId(id);
-    try {
-      const data = await fetchWorkItem(id);
-      setSelectedItem(data);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setOpeningId(null);
-    }
-  };
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const anyFilterActive = !!(search || selClientes.length || selCategoria.length || selStatus.length || selResponsavel.length);
@@ -149,13 +136,15 @@ export default function Historico() {
                 className={`border-b border-border transition-colors hover:bg-surface-2 ${i % 2 === 0 ? '' : 'bg-[#fafafa]'}`}
               >
                 <td className="px-4 py-2.5 max-w-[360px]">
-                  <button
-                    onClick={() => openReadOnly(item.Id)}
-                    disabled={openingId === item.Id}
-                    className="text-[#1d4ed8] hover:underline font-medium disabled:opacity-50"
+                  <a
+                    href={getDevOpsWorkItemUrl(item.Id, item.DevOpsAreaPath)}
+                    target="_blank"
+                    rel="noopener"
+                    title="Abrir chamado no DevOps"
+                    className="text-[#1d4ed8] hover:underline font-medium"
                   >
                     #{item.Id}
-                  </button>
+                  </a>
                   <span className="text-txt ml-2 truncate inline-block align-middle max-w-[260px]" title={item.Title}>{item.Title}</span>
                   <div className="text-[11px] text-txt-3 truncate mt-0.5">
                     {[item.Categoria, item.Modulo, item.AssignedTo].filter(Boolean).join(' · ') || '—'}
@@ -210,16 +199,6 @@ export default function Historico() {
           workItemId={docDrawer.id}
           title={docDrawer.title}
           onClose={() => setDocDrawer(null)}
-        />
-      )}
-
-      {/* Modal do chamado — mesma tela do Dashboard, travada (somente leitura) porque o
-          chamado já está encerrado */}
-      {selectedItem && (
-        <WorkItemModal
-          item={selectedItem}
-          onClose={() => setSelectedItem(null)}
-          readOnly
         />
       )}
     </div>

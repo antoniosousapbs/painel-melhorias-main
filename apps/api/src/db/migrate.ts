@@ -487,6 +487,14 @@ Retorne APENAS um JSON valido:')
     ALTER TABLE DocumentVersionHistory ADD EspecificacaoJson NVARCHAR(MAX);
   `);
 
+  // Síntese da LLM (resumoGeral na geração inicial, resumoAlteracoes em cada refinamento) —
+  // antes só era usada em memória e descartada; agora persiste por versão pra reconstruir a
+  // evolução completa da análise (Memória de Cálculo) e a trilha de auditoria (PDF).
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('DocumentVersionHistory') AND name = 'ResumoAnalise')
+    ALTER TABLE DocumentVersionHistory ADD ResumoAnalise NVARCHAR(MAX);
+  `);
+
   // ── InterviewSessions: conflict detection for concurrent users ───────────────
   await pool.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'InterviewSessions')

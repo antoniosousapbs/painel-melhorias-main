@@ -25,7 +25,10 @@ function trimHistoryByBudget(history: { role: string; content: string }[], maxCh
     const len = history[i].content.length;
     if (kept.length > 0 && total + len > maxChars) break; // sempre mantém ao menos a última mensagem
     total += len;
-    kept.unshift(history[i]);
+    // Só repassa role/content pro provider — o front pode enviar campos extras (ex.: `at`, usado
+    // só pra montar o InterviewContext com horário por turno) que a API do provider (Groq/OpenAI-
+    // compatible) rejeita com HTTP 400 se estiverem presentes no objeto da mensagem.
+    kept.unshift({ role: history[i].role, content: history[i].content });
   }
   return kept;
 }

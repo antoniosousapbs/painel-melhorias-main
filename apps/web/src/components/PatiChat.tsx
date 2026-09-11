@@ -17,6 +17,13 @@ interface Message {
   content: string;
 }
 
+/** Horário com milissegundos (ex: "15:15:56.123") — diferencia turnos que aconteceram no mesmo
+ * segundo (respostas rápidas), o que `toLocaleTimeString` sozinho não distingue. */
+function formatHoraComMs(iso: string): string {
+  const d = new Date(iso);
+  return `${d.toLocaleTimeString('pt-BR')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
 const SUGGESTIONS = [
   'Resumo geral do painel',
   'Qual cliente tem mais chamados?',
@@ -144,7 +151,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState<{ pct: number; current: number; total: number } | null>(null);
-  const [interview, setInterview] = useState<{ active: boolean; workItemId: number; tipo: string; history: { role: string; content: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean } | null>(null);
+  const [interview, setInterview] = useState<{ active: boolean; workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean } | null>(null);
   const [pendingDocTipo, setPendingDocTipo] = useState<'APF' | 'SPEC' | 'AMBOS' | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
@@ -491,13 +498,13 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, [onClassifyDone]);
 
   /* ─── Interview mode: gather requirements before generation ─── */
-  const runInterviewStep = useCallback(async (userAnswer: string, interviewState: { workItemId: number; tipo: string; history: { role: string; content: string }[]; bulk?: boolean; force?: boolean; isRefinement?: boolean }) => {
+  const runInterviewStep = useCallback(async (userAnswer: string, interviewState: { workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; bulk?: boolean; force?: boolean; isRefinement?: boolean }) => {
     setStreaming(true);
     setStatus('PATi analisando...');
 
     const newHistory = [...interviewState.history];
     if (userAnswer) {
-      newHistory.push({ role: 'user', content: userAnswer });
+      newHistory.push({ role: 'user', content: userAnswer, at: new Date().toISOString() });
     }
 
     const controller = new AbortController();
@@ -568,7 +575,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       }
 
       // Update interview history
-      newHistory.push({ role: 'assistant', content: assistantText });
+      newHistory.push({ role: 'assistant', content: assistantText, at: new Date().toISOString() });
 
       if (ready) {
         // PATi signaled [PRONTO_PARA_GERAR] — check if user already confirmed
@@ -583,7 +590,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           await endSession(sidToUse);
           const contextFromInterview = newHistory
             .filter(m => m.role === 'user' || m.role === 'assistant')
-            .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
+            .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}${m.at ? ` [${formatHoraComMs(m.at)}]` : ''}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
             .join('\n');
           const tipo = interviewState.tipo as 'APF' | 'SPEC' | 'AMBOS';
           if (isRefinementFlag && tipo === 'APF' && !interviewState.bulk) {
@@ -660,11 +667,11 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         setInterview(null);
         const targetId = overrideReq.ids[0];
         if (targetId) {
-          const interviewState = { active: true, workItemId: targetId, tipo: overrideReq.tipo, history: [] as { role: string; content: string }[], bulk: false, force: overrideReq.force };
+          const interviewState = { active: true, workItemId: targetId, tipo: overrideReq.tipo, history: [] as { role: string; content: string; at?: string }[], bulk: false, force: overrideReq.force };
           setInterview(interviewState);
           await runInterviewStep('', interviewState);
         } else {
-          const interviewState = { active: true, workItemId: 0, tipo: overrideReq.tipo, history: [] as { role: string; content: string }[], bulk: true, force: overrideReq.force };
+          const interviewState = { active: true, workItemId: 0, tipo: overrideReq.tipo, history: [] as { role: string; content: string; at?: string }[], bulk: true, force: overrideReq.force };
           setInterview(interviewState);
           await runInterviewStep('', interviewState);
         }
@@ -680,7 +687,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           await endSession(sidToUse);
           const contextFromInterview = interview.history
             .filter(m => m.role === 'user' || m.role === 'assistant')
-            .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
+            .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}${m.at ? ` [${formatHoraComMs(m.at)}]` : ''}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
             .join('\n');
           const tipo = interview.tipo as 'APF' | 'SPEC' | 'AMBOS';
           if (interview.isRefinement && tipo === 'APF' && !interview.bulk) {
@@ -709,11 +716,11 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       if (ids.length > 0 || hasAll) {
         const targetId = ids[0];
         if (targetId) {
-          const interviewState = { active: true, workItemId: targetId, tipo, history: [] as { role: string; content: string }[], bulk: false, force: false };
+          const interviewState = { active: true, workItemId: targetId, tipo, history: [] as { role: string; content: string; at?: string }[], bulk: false, force: false };
           setInterview(interviewState);
           await runInterviewStep('', interviewState);
         } else {
-          const interviewState = { active: true, workItemId: 0, tipo, history: [] as { role: string; content: string }[], bulk: true, force: false };
+          const interviewState = { active: true, workItemId: 0, tipo, history: [] as { role: string; content: string; at?: string }[], bulk: true, force: false };
           setInterview(interviewState);
           await runInterviewStep('', interviewState);
         }
@@ -775,12 +782,12 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       const targetId = docReq.ids[0];
       if (targetId) {
         const sid = await startSession(targetId, docReq.tipo);
-        const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: [] as { role: string; content: string }[], bulk: false, force: docReq.force };
+        const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: [] as { role: string; content: string; at?: string }[], bulk: false, force: docReq.force };
         setInterview(interviewState);
         await runInterviewStep('', interviewState);
       } else {
         // "todos" — bulk interview obrigatório (lê description+DiscussionPati de todos os itens)
-        const interviewState = { active: true, workItemId: 0, tipo: docReq.tipo, history: [] as { role: string; content: string }[], bulk: true, force: docReq.force };
+        const interviewState = { active: true, workItemId: 0, tipo: docReq.tipo, history: [] as { role: string; content: string; at?: string }[], bulk: true, force: docReq.force };
         setInterview(interviewState);
         await runInterviewStep('', interviewState);
       }
@@ -810,7 +817,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         const hasSpecWord = /(spec|especif)\w*/.test(lower);
         const tipo: 'APF' | 'SPEC' | 'AMBOS' = hasApfWord && !hasSpecWord ? 'APF' : hasSpecWord && !hasApfWord ? 'SPEC' : 'AMBOS';
         // Start interview instead of generating directly
-        const interviewState = { active: true, workItemId: lastId, tipo, history: [] as { role: string; content: string }[], bulk: false, force: false };
+        const interviewState = { active: true, workItemId: lastId, tipo, history: [] as { role: string; content: string; at?: string }[], bulk: false, force: false };
         setInterview(interviewState);
         await runInterviewStep('', interviewState);
         return;

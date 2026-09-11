@@ -219,7 +219,11 @@ const REASONING_MIN_TOKENS: Record<LlmFinalidade, number> = {
   // de raciocínio dentro do mesmo orçamento — 6000 (suficiente em 'medium') fazia o modelo
   // gastar tudo em raciocínio e devolver resposta vazia (JSON.parse: "Unexpected end of
   // JSON input"), regressão real detectada ao gerar a especificação do chamado #326204.
-  spec_estruturacao: 16000,
+  // Subido de 16000 pra 24000 após NOVA ocorrência em produção (chamado com contexto maior
+  // esgotou o piso anterior de novo) — só aumenta o TETO de tokens de saída, não o esforço
+  // de raciocínio (`reasoning_effort` continua 'medium'), então não reintroduz o problema
+  // de timeout que motivou reverter de 'high' pra 'medium'.
+  spec_estruturacao: 24000,
   spec_revisao: 4000,
 };
 
@@ -314,7 +318,17 @@ async function callProvider(
       throw lastErr;
     }
     const data = await res.json() as any;
-    return data.choices?.[0]?.message?.content || '';
+    const content = data.choices?.[0]?.message?.content || '';
+    // Resposta vazia com HTTP 200 (ex.: modelo de raciocínio gastou todo o orçamento de
+    // tokens em raciocínio interno, finish_reason="length") NÃO pode ser tratada como
+    // sucesso — sem isso, o fallback pro próximo provider da cadeia (ver llmComplete)
+    // nunca era acionado, e o erro só aparecia bem mais tarde (ex.: "estruturação da
+    // especificação" recebendo string vazia). Lançar aqui aciona o fallback já existente.
+    if (!content.trim()) {
+      const finishReason = data.choices?.[0]?.finish_reason;
+      throw new Error(`${provider.modelName}: resposta vazia (finish_reason=${finishReason || 'desconhecido'}${finishReason === 'length' ? ' — orçamento de tokens esgotado, provável raciocínio interno excessivo' : ''})`);
+    }
+    return content;
   }
   throw lastErr || new Error(`${provider.modelName}: excedeu tentativas por rate limit (429)`);
 }
@@ -366,7 +380,11 @@ async function callOllama(messages: Msg[]): Promise<string> {
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
   const data = await res.json() as any;
-  return data.message?.content || '';
+  const content = data.message?.content || '';
+  // Mesma proteção do callProvider — resposta vazia não pode virar sucesso silencioso,
+  // senão o erro real (ex.: dos providers anteriores da cadeia) fica mascarado.
+  if (!content.trim()) throw new Error('Ollama: resposta vazia');
+  return content;
 }
 
 async function* streamOllama(messages: Msg[]): AsyncGenerator<string> {
