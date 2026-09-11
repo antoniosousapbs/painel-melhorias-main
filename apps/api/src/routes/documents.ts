@@ -689,6 +689,51 @@ router.put('/sessions/:sessionId', async (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// PUT /api/documents/sessions/:sessionId/transcript — salva o histórico da entrevista até
+// agora (chamado a cada turno respondido) — permite RETOMAR de onde parou numa falha de
+// LLM/rede ou se o analista fechar o navegador no meio da entrevista.
+router.put('/sessions/:sessionId/transcript', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { history } = req.body;
+  if (!Array.isArray(history)) return res.status(400).json({ error: 'history deve ser um array' });
+  const pool = await getPool();
+  await pool.request()
+    .input('sid', sql.NVarChar(100), sessionId)
+    .input('transcript', sql.NVarChar(sql.MAX), JSON.stringify(history))
+    .query(`UPDATE InterviewSessions SET TranscriptJson = @transcript, LastActivity = GETDATE() WHERE SessionId = @sid`);
+  res.json({ ok: true });
+});
+
+// GET /api/documents/sessions/resume?workItemId=X&tipo=APF — retorna a entrevista NÃO
+// concluída mais recente do próprio usuário autenticado pra esse chamado+tipo (se houver),
+// pra oferecer retomar em vez de começar do zero. Nunca retorna entrevista de OUTRO usuário.
+router.get('/sessions/resume', async (req: Request, res: Response) => {
+  const wid = parseInt(req.query.workItemId as string);
+  const tipo = req.query.tipo as string;
+  if (isNaN(wid) || !tipo) return res.status(400).json({ error: 'workItemId e tipo são obrigatórios' });
+  const user = tryExtractUser(req.headers.authorization);
+  if (!user?.userId) return res.json({ resumable: false });
+
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('wid', sql.Int, wid)
+    .input('tipo', sql.NVarChar(10), tipo)
+    .input('uid', sql.NVarChar(200), user.userId)
+    .query(`
+      SELECT TOP 1 SessionId, TranscriptJson, LastActivity
+      FROM InterviewSessions
+      WHERE WorkItemId = @wid AND Tipo = @tipo AND UserId = @uid
+        AND Status IN ('active', 'abandoned') AND TranscriptJson IS NOT NULL
+      ORDER BY LastActivity DESC
+    `);
+  const row = r.recordset[0];
+  if (!row) return res.json({ resumable: false });
+  let history: any[] = [];
+  try { history = JSON.parse(row.TranscriptJson) || []; } catch { history = []; }
+  if (history.length === 0) return res.json({ resumable: false });
+  res.json({ resumable: true, sessionId: row.SessionId, history, lastActivity: row.LastActivity });
+});
+
 // DELETE /api/documents/sessions/:sessionId — release session
 router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
   const { sessionId } = req.params;

@@ -512,6 +512,15 @@ Retorne APENAS um JSON valido:')
     );
   `);
 
+  // TranscriptJson: histórico completo da entrevista (turnos PATi/Analista), salvo a cada
+  // pergunta respondida — sem isso, uma falha de LLM/rede no meio de uma entrevista longa
+  // (ou o navegador fechando) perdia tudo, obrigando o analista a responder tudo de novo do
+  // zero (incidente real: chamado #318120). Permite RETOMAR a entrevista de onde parou.
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('InterviewSessions') AND name = 'TranscriptJson')
+    ALTER TABLE InterviewSessions ADD TranscriptJson NVARCHAR(MAX) NULL;
+  `);
+
   // ── UserRoles: controle de acesso (Admin vs Operador) ────────────────────────
   await pool.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'UserRoles')

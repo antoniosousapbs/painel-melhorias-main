@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import PatiSprite from './PatiSprite';
 import { getAccessToken } from '../auth/authFetch';
-import { registerInterviewSession, releaseInterviewSession, heartbeatInterviewSession, fetchLlmCurrentProviderLabel, API_BASE } from '../services/api';
+import { registerInterviewSession, releaseInterviewSession, heartbeatInterviewSession, saveInterviewTranscript, fetchResumableInterview, fetchLlmCurrentProviderLabel, API_BASE } from '../services/api';
 import { useMsal } from '@azure/msal-react';
 
 export interface PatiFilters {
@@ -182,6 +182,10 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Lido dentro de callbacks (ex.: runInterviewStep) sem precisar entrar na dependency array —
+  // evita recriar a função a cada troca de sessionId e evita closure desatualizada.
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -316,7 +320,20 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, [filters, onClassifyDone]);
 
   /* ─── Session helpers ─── */
-  const startSession = useCallback(async (workItemId: number, tipo: string): Promise<string> => {
+  // Antes de começar uma entrevista do zero, verifica se o PRÓPRIO usuário já tem uma
+  // entrevista não concluída pra esse chamado+tipo salva no servidor (ver TranscriptJson) —
+  // se houver, retoma o mesmo sessionId + histórico em vez de perguntar tudo de novo (só
+  // some se a entrevista terminar com sucesso ou for encerrada explicitamente pelo usuário).
+  const startSession = useCallback(async (workItemId: number, tipo: string): Promise<{ sid: string; resumedHistory: { role: string; content: string; at?: string }[] }> => {
+    try {
+      const resumable = await fetchResumableInterview(workItemId, tipo);
+      if (resumable.resumable && resumable.sessionId && resumable.history?.length) {
+        setSessionId(resumable.sessionId);
+        setConflictWarning(null);
+        return { sid: resumable.sessionId, resumedHistory: resumable.history };
+      }
+    } catch { /* segue pro fluxo normal se a checagem falhar */ }
+
     const sid = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
       const result = await registerInterviewSession(sid, workItemId, tipo, userName, userEmail);
@@ -328,7 +345,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         setConflictWarning(null);
       }
     } catch { /* non-blocking */ }
-    return sid;
+    return { sid, resumedHistory: [] };
   }, [userName, userEmail]);
 
   const endSession = useCallback(async (sid: string | null) => {
@@ -633,6 +650,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
 
       // Update interview history
       newHistory.push({ role: 'assistant', content: assistantText, at: new Date().toISOString() });
+      // Salva no servidor a cada turno (fire-and-forget) — permite retomar a entrevista depois
+      // sem repetir as respostas, mesmo que a geração final falhe ou o navegador feche.
+      if (sessionIdRef.current) saveInterviewTranscript(sessionIdRef.current, newHistory).catch(() => {});
 
       if (ready) {
         // PATi signaled [PRONTO_PARA_GERAR] — check if user already confirmed
@@ -858,8 +878,11 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       // Start interview for the first matching ID (or first from list)
       const targetId = docReq.ids[0];
       if (targetId) {
-        const sid = await startSession(targetId, docReq.tipo);
-        const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: [] as { role: string; content: string; at?: string }[], bulk: false, force: docReq.force };
+        const { resumedHistory } = await startSession(targetId, docReq.tipo);
+        if (resumedHistory.length > 0) {
+          setMessages(prev => [...prev, { role: 'assistant', content: '🔄 Encontrei uma entrevista sua não concluída para este chamado — retomando de onde você parou, sem precisar repetir as respostas.' }]);
+        }
+        const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: resumedHistory, bulk: false, force: docReq.force };
         setInterview(interviewState);
         await runInterviewStep('', interviewState);
       } else {

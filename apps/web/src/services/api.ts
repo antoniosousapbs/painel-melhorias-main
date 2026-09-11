@@ -536,3 +536,24 @@ export async function heartbeatInterviewSession(sessionId: string) {
   await authFetch(`${API_BASE}/documents/sessions/${sessionId}`, { method: 'PUT' });
 }
 
+export interface InterviewTurn { role: string; content: string; at?: string }
+
+/** Salva o histórico da entrevista no servidor a cada turno respondido — permite retomar de
+ * onde parou numa falha de LLM/rede ou fechamento do navegador (não bloqueia a UI: chamador
+ * deve tratar como "fire and forget", uma falha aqui não deve travar a entrevista). */
+export async function saveInterviewTranscript(sessionId: string, history: InterviewTurn[]) {
+  await authFetch(`${API_BASE}/documents/sessions/${sessionId}/transcript`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ history }),
+  });
+}
+
+/** Verifica se o usuário atual tem uma entrevista não concluída pra esse chamado+tipo, salva
+ * no servidor, pra oferecer retomar em vez de come\u00e7ar do zero. */
+export async function fetchResumableInterview(workItemId: number, tipo: string) {
+  const res = await authFetch(`${API_BASE}/documents/sessions/resume?workItemId=${workItemId}&tipo=${tipo}`);
+  if (!res.ok) return { resumable: false as const };
+  return res.json() as Promise<{ resumable: boolean; sessionId?: string; history?: InterviewTurn[]; lastActivity?: string }>;
+}
+
