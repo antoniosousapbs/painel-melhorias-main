@@ -318,7 +318,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, [sessionId]);
 
   /* ─── Document generation via SSE ─── */
-  const runDocGeneration = useCallback(async (tipo: 'APF' | 'SPEC' | 'SPEC_DOCX' | 'AMBOS', ids: number[], force = false, interviewContext?: string, activeSid?: string) => {
+  const runDocGeneration = useCallback(async (tipo: 'APF' | 'SPEC' | 'SPEC_DOCX' | 'AMBOS', ids: number[], force = false, interviewContext?: string, activeSid?: string): Promise<boolean> => {
     setStreaming(true);
     setStatus('');
     setProgress(null);
@@ -334,21 +334,31 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
     abortRef.current = controller;
 
     try {
-      const params = new URLSearchParams({ tipo });
-      if (ids.length > 0) params.set('ids', ids.join(','));
-      if (force) params.set('force', 'true');
-      if (interviewContext) params.set('interviewContext', interviewContext);
-      if (activeSid) params.set('sessionId', activeSid);
+      // POST com corpo JSON (não mais GET com querystring) — `interviewContext` compilado de
+      // uma entrevista longa pode passar de dezenas de KB; URL-encoded (acentos do português
+      // viram %XX, ~3x mais bytes) estourava o limite de URL do IIS/Node antes mesmo de chegar
+      // no Express, derrubando a geração sem nenhum log e perdendo a entrevista inteira.
+      const body: Record<string, unknown> = { tipo };
+      if (ids.length > 0) body.ids = ids.join(',');
+      if (force) body.force = true;
+      if (interviewContext) body.interviewContext = interviewContext;
+      if (activeSid) body.sessionId = activeSid;
       // Pass dashboard filters so generation respects current view
-      if (filters.cliente) params.set('cliente', filters.cliente);
-      if (filters.categoria) params.set('categoria', filters.categoria);
-      if (filters.modulo) params.set('modulo', filters.modulo);
-      if (filters.prioridade) params.set('prioridade', filters.prioridade);
-      if (filters.status) params.set('status', filters.status);
+      if (filters.cliente) body.cliente = filters.cliente;
+      if (filters.categoria) body.categoria = filters.categoria;
+      if (filters.modulo) body.modulo = filters.modulo;
+      if (filters.prioridade) body.prioridade = filters.prioridade;
+      if (filters.status) body.status = filters.status;
 
       const token = await getAccessToken();
-      const res = await fetch(`${API_BASE}/documents/generate/stream?${params}`, { signal: controller.signal, headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(`${API_BASE}/documents/generate/stream`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
       if (!res.ok) throw new Error('Erro ao iniciar geração');
+
 
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
@@ -440,10 +450,12 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           } catch { /* skip malformed SSE line */ }
         }
       }
+      return true;
     } catch (err: any) {
       if (err.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'assistant', content: '❌ Erro ao conectar com o serviço de geração de documentos.' }]);
+        setMessages(prev => [...prev, { role: 'assistant', content: '❌ Erro ao conectar com o serviço de geração de documentos. Suas respostas da entrevista NÃO foram perdidas — pode tentar novamente dizendo "sim".' }]);
       }
+      return false;
     } finally {
       setStreaming(false);
       setStatus('');
@@ -453,7 +465,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, [onClassifyDone, filters]);
 
   /* ─── APF Refinement via chat ─── */
-  const runRefinement = useCallback(async (workItemId: number, instrucao: string) => {
+  const runRefinement = useCallback(async (workItemId: number, instrucao: string): Promise<boolean> => {
     setStreaming(true);
     setStatus('Analisando ajuste...');
     setMessages(prev => [...prev, { role: 'assistant', content: `⏳ Ajustando contagem APF do **#${workItemId}** com base na sua instrução...` }]);
@@ -485,12 +497,14 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         return copy;
       });
       onClassifyDone?.(); // refresh dashboard
+      return true;
     } catch (err: any) {
       setMessages(prev => {
         const copy = [...prev];
-        copy[copy.length - 1] = { role: 'assistant', content: `❌ ${err.message}` };
+        copy[copy.length - 1] = { role: 'assistant', content: `❌ ${err.message} Suas respostas NÃO foram perdidas — pode tentar novamente dizendo "sim".` };
         return copy;
       });
+      return false;
     } finally {
       setStreaming(false);
       setStatus('');
@@ -584,23 +598,31 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         const userAlreadyConfirmed = /(^|\s)(sim|pode|gerar?|vai|manda|ok|bora|claro|vamo|faz|gere|com certeza|logico|obvio|beleza|por favor|pfv|pf|agora|entao)\b/.test(lastLower);
 
         if (userAlreadyConfirmed) {
-          // User ALREADY confirmed (said "sim" etc.) → generate immediately
+          // User ALREADY confirmed (said "sim" etc.) → generate immediately. Só limpa a
+          // entrevista/encerra a sessão DEPOIS de confirmado sucesso — se a geração falhar
+          // (ex.: erro de rede/servidor), a entrevista inteira (já confirmada) não pode ser
+          // perdida; mantemos o estado pronto pra o usuário só dizer "sim" de novo.
           const sidToUse = sessionId;
-          setInterview(null);
-          await endSession(sidToUse);
           const contextFromInterview = newHistory
             .filter(m => m.role === 'user' || m.role === 'assistant')
             .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}${m.at ? ` [${formatHoraComMs(m.at)}]` : ''}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
             .join('\n');
           const tipo = interviewState.tipo as 'APF' | 'SPEC' | 'AMBOS';
+          let success: boolean;
           if (isRefinementFlag && tipo === 'APF' && !interviewState.bulk) {
-            await runRefinement(interviewState.workItemId, contextFromInterview);
+            success = await runRefinement(interviewState.workItemId, contextFromInterview);
           } else {
             setMessages(prev => [...prev, { role: 'assistant', content: '⏳ Gerando documento com base nas informações coletadas...' }]);
             const ids = interviewState.bulk ? [] : [interviewState.workItemId];
             // "Especificação" via chat usa o novo pipeline (template Word) por padrão.
             const genTipo = tipo === 'SPEC' ? 'SPEC_DOCX' : tipo;
-            await runDocGeneration(genTipo, ids, contextFromInterview ? true : (interviewState.force ?? false), contextFromInterview, sidToUse ?? undefined);
+            success = await runDocGeneration(genTipo, ids, contextFromInterview ? true : (interviewState.force ?? false), contextFromInterview, sidToUse ?? undefined);
+          }
+          if (success) {
+            setInterview(null);
+            await endSession(sidToUse);
+          } else {
+            setInterview({ active: true, workItemId: interviewState.workItemId, tipo: interviewState.tipo, history: newHistory, readyToGenerate: true, bulk: interviewState.bulk, force: interviewState.force, isRefinement: isRefinementFlag });
           }
         } else {
           // PATi triggered prematurely (without user confirmation) → wait
@@ -683,21 +705,33 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         const isConfirm = /(^|\s)(sim|pode|gerar?|vai|manda|ok|bora|claro|vamo|faz|gere|com certeza|logico|obvio|beleza|por favor|pfv|pf|agora|entao)\b/.test(normalizedForInterview);
         if (isConfirm) {
           const sidToUse = sessionId;
-          setInterview(null);
-          await endSession(sidToUse);
-          const contextFromInterview = interview.history
+          // A confirmação do analista ("sim"/"pode"/...) precisa entrar no histórico ANTES de
+          // montar o InterviewContext — sem isso, a resposta que libera a geração fica visível
+          // só no chat da tela, mas nunca é gravada na trilha de auditoria (PDF).
+          const historyWithConfirmation = [...interview.history, { role: 'user', content: msg, at: new Date().toISOString() }];
+          const contextFromInterview = historyWithConfirmation
             .filter(m => m.role === 'user' || m.role === 'assistant')
             .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}${m.at ? ` [${formatHoraComMs(m.at)}]` : ''}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
             .join('\n');
           const tipo = interview.tipo as 'APF' | 'SPEC' | 'AMBOS';
+          let success: boolean;
           if (interview.isRefinement && tipo === 'APF' && !interview.bulk) {
-            await runRefinement(interview.workItemId, contextFromInterview);
+            success = await runRefinement(interview.workItemId, contextFromInterview);
           } else {
             setMessages(prev => [...prev, { role: 'assistant', content: '⏳ Gerando documento com base nas informações coletadas...' }]);
             const ids = interview.bulk ? [] : [interview.workItemId];
             // "Especificação" via chat usa o novo pipeline (template Word) por padrão.
             const genTipo = tipo === 'SPEC' ? 'SPEC_DOCX' : tipo;
-            await runDocGeneration(genTipo, ids, contextFromInterview ? true : (interview.force ?? false), contextFromInterview, sidToUse ?? undefined);
+            success = await runDocGeneration(genTipo, ids, contextFromInterview ? true : (interview.force ?? false), contextFromInterview, sidToUse ?? undefined);
+          }
+          // Só limpa a entrevista/encerra a sessão DEPOIS de confirmado sucesso — numa falha
+          // (ex.: erro de rede/servidor), a entrevista inteira já confirmada não pode ser
+          // perdida; mantemos o estado pronto pra o usuário só dizer "sim" de novo.
+          if (success) {
+            setInterview(null);
+            await endSession(sidToUse);
+          } else {
+            setInterview({ ...interview, history: historyWithConfirmation });
           }
           return;
         }

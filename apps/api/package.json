@@ -12,7 +12,8 @@
     "verify:excel": "tsx src/db/verify-excel-template.ts",
     "verify:apf-auditoria-pdf": "tsx src/db/verify-apf-auditoria-pdf.ts",
     "verify:spec-docx": "tsx src/db/verify-spec-docx.ts",
-    "verify:template-generic": "tsx src/db/verify-template-generic.ts"
+    "verify:template-generic": "tsx src/db/verify-template-generic.ts",
+    "gerar:apf-validacao": "tsx src/db/gerar-apf-validacao.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

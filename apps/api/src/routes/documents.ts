@@ -22,7 +22,8 @@ router.post('/:id/generate-apf', async (req, res) => {
     if (!workItem) return res.status(404).json({ error: 'Chamado não encontrado' });
     // Convert interview history to text for use as extraContext
     const extraContext = interviewHistoryToText(req.body?.interviewHistory);
-    const result = await generateApf(id, extraContext || undefined);
+    const auditUser = tryExtractUser(req.headers.authorization);
+    const result = await generateApf(id, extraContext || undefined, auditUser);
     res.json({ totalPF: result.apf.totalPF, totalPFA: result.apf.totalPFA, totalHoras: result.apf.totalHoras, elementos: result.apf.elementos.length });
   } catch (err: any) {
     console.error('APF generation error:', err.message);
@@ -276,10 +277,16 @@ router.delete('/knowledge/:id', requireRole('Admin'), async (req, res) => {
 });
 
 // ─── SSE Streaming: Batch document generation via PATi chat ───
-// GET /api/documents/generate/stream?ids=318350,305156&tipo=APF|SPEC|AMBOS&force=false&cliente=X&categoria=Y
-router.get('/generate/stream', async (req: Request, res: Response) => {
-  const { ids: idsParam, tipo = 'AMBOS', force = 'false', interviewContext: interviewCtx, sessionId: reqSessionId } = req.query;
-  const forceRegenerate = force === 'true' || force === '1';
+// POST /api/documents/generate/stream — body: { ids, tipo, force, interviewContext, sessionId,
+// cliente, categoria, modulo, prioridade, status }. ERA GET com tudo na query string — uma
+// entrevista longa com a PATi gera um `interviewContext` de vários KB, que ao ser URL-encoded
+// (acentos/pontuação do português viram %XX, 3x mais bytes) estourava o limite de tamanho de
+// URL do IIS/Node MUITO antes de chegar no Express — a requisição falhava na camada de rede,
+// sem NENHUM log de aplicação (nem erro, nem auditoria), e a entrevista inteira era perdida.
+// Corpo de POST não tem esse teto (só o limite do body-parser, configurado bem mais alto).
+router.post('/generate/stream', async (req: Request, res: Response) => {
+  const { ids: idsParam, tipo = 'AMBOS', force = 'false', interviewContext: interviewCtx, sessionId: reqSessionId } = req.body;
+  const forceRegenerate = force === 'true' || force === true;
   const interviewContext = typeof interviewCtx === 'string' && interviewCtx.trim() ? interviewCtx.trim() : undefined;
   const sessionId = typeof reqSessionId === 'string' ? reqSessionId : undefined;
 
@@ -287,16 +294,18 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
   const auditUser = tryExtractUser(req.headers.authorization);
 
   // Dashboard filters (passed from chat)
-  const filterCliente = req.query.cliente as string | undefined;
-  const filterCategoria = req.query.categoria as string | undefined;
-  const filterModulo = req.query.modulo as string | undefined;
-  const filterPrioridade = req.query.prioridade as string | undefined;
-  const filterStatus = req.query.status as string | undefined;
+  const filterCliente = req.body.cliente as string | undefined;
+  const filterCategoria = req.body.categoria as string | undefined;
+  const filterModulo = req.body.modulo as string | undefined;
+  const filterPrioridade = req.body.prioridade as string | undefined;
+  const filterStatus = req.body.status as string | undefined;
 
   // Parse IDs
   let workItemIds: number[] = [];
   if (typeof idsParam === 'string' && idsParam.trim()) {
     workItemIds = idsParam.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
+  } else if (Array.isArray(idsParam)) {
+    workItemIds = idsParam.map((n: any) => parseInt(n)).filter(n => !isNaN(n) && n > 0);
   }
 
   const pool = await getPool();
@@ -437,7 +446,7 @@ router.get('/generate/stream', async (req: Request, res: Response) => {
 
       try {
         const t0 = Date.now();
-        const result = await generateApf(item.Id, interviewContext);
+        const result = await generateApf(item.Id, interviewContext, auditUser);
         const elapsed = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
         generated++;
 
@@ -793,8 +802,8 @@ router.get('/:id/versions/:versionId/download', async (req: Request, res: Respon
     // Fetch work item metadata
     const wiRow = await pool.request()
       .input('wid', sql.Int, workItemId)
-      .query(`SELECT Id, Title, ClienteNome, Modulo FROM WorkItems WHERE Id = @wid`);
-    const wi = wiRow.recordset[0] || { Id: workItemId, Title: version.WorkItemTitle, ClienteNome: null, Modulo: null };
+      .query(`SELECT Id, Title, ClienteNome, Modulo, Description, DiscussionPati FROM WorkItems WHERE Id = @wid`);
+    const wi = wiRow.recordset[0] || { Id: workItemId, Title: version.WorkItemTitle, ClienteNome: null, Modulo: null, Description: null, DiscussionPati: null };
 
     if (version.Tipo === 'APF') {
       if (!version.ElementosJson) return res.status(404).json({ error: 'Snapshot de elementos não disponível para esta versão' });
