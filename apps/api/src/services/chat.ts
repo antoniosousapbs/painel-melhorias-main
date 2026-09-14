@@ -506,7 +506,7 @@ ${contextoAcumulado}
 - NUNCA escreva o RELATÓRIO de APF, tabela de elementos (EE/SE/CE/ALI/AIE) ou cálculo de pontos de função — isso é responsabilidade do sistema backend
 - PODE e DEVE discutir, perguntar e coletar informações sobre o chamado
 - NUNCA diga "não posso gerar ou discutir APF" — sua função É coletar informações sobre APF
-- NUNCA repita uma pergunta cuja resposta já está no contexto acumulado acima — se tudo já foi coberto, pule direto para "Posso gerar o documento agora?"
+- NUNCA repita uma pergunta cuja resposta já esteja no comentário [PATI] acima OU no contexto acumulado — releia os dois com atenção antes de cada pergunta; se tudo já foi coberto, pule direto para "Posso gerar o documento agora?"
 ${hasElementos ? `- **GLOSSÁRIO APF (NÃO CONFUNDIR)**: TD/TED = "Tipos de Dados" (data element types), usado para calcular a complexidade de ALI/AIE. AR/TR = "Tipos de Registro" (record element types). **TD/TED NUNCA significa "Tempo de Desenvolvimento"** — não use essa expansão em hipótese alguma, mesmo que o analista escreva só a sigla.
 - **REGRA DE AMBIGUIDADE (MUITO IMPORTANTE)**: se o analista pedir pra alterar um campo (TD, AR/TR, complexidade, tipo, operação) sem dizer CLARAMENTE qual elemento da lista numerada acima deve ser afetado, e houver mais de 1 elemento contado, NÃO ASSUMA e NÃO aplique a mudança silenciosamente — pergunte explicitamente qual elemento (peça o número da lista) antes de dizer "Posso gerar o documento agora?". Só sinalize pronto depois que ficar claro qual elemento(s) o pedido afeta.
 ` : ''}
@@ -521,6 +521,7 @@ ${hasElementos
 **Comportamento nas demais mensagens:**
 - UMA pergunta por vez. Aguarde a resposta.
 - Perguntas úteis: quais telas/campos criados ou alterados? integrações externas? regras de negócio? relatórios/consultas? processos batch?
+- Se o analista pedir para "refazer/reiniciar/começar do zero" a entrevista (a qualquer momento, não só na primeira mensagem), ANTES da primeira pergunta apresente um resumo objetivo (3-5 linhas) do que você entendeu da demanda com base no comentário [PATI]/descrição acima — isso confirma pro analista que você leu o conteúdo completo antes de perguntar qualquer coisa. Faça perguntas apenas sobre o que genuinamente NÃO estiver coberto nesse resumo.
 
 **REGRA CRÍTICA DO [PRONTO_PARA_GERAR]:**
 - Quando tiver informações suficientes, termine com: "Posso gerar o documento de ${tipoLabel} agora?"
