@@ -618,6 +618,25 @@ Retorne APENAS um JSON valido:')
     END
   `);
 
+  // Fix real (2026-09-14, chamado #318120): Groq (openai/gpt-oss-120b, tier on_demand) tem
+  // limite de 8000 tokens/minuto — baixo demais como FALLBACK de spec_estruturacao/
+  // spec_geracao/spec_revisao agora que o contexto injetado cresceu bastante (comentário
+  // [PATI] até 20000 chars + entrevistas mais longas + contexto acumulado). Reproduzido:
+  // GPT-5.4 (primário) estoura o timeout de 240s com esse volume, cai pro Groq, que devolve
+  // HTTP 413 "Request too large ... TPM 8000" — os dois providers da cadeia falhavam, sem
+  // nenhum fallback restante. Troca o fallback dessas 3 finalidades pra GPT-4.1 (Azure AI
+  // Foundry — não é modelo de raciocínio, sem esse teto de tokens/minuto) só quando ainda
+  // estiver apontando pro Groq — não sobrescreve troca manual feita pelo admin depois disso.
+  await pool.request().query(`
+    IF EXISTS (SELECT 1 FROM LlmProviders WHERE Nome = 'GPT-4.1 (Azure AI Foundry)' AND Ativo = 1)
+    UPDATE c
+      SET c.FallbackProviderId = (SELECT TOP 1 Id FROM LlmProviders WHERE Nome = 'GPT-4.1 (Azure AI Foundry)' AND Ativo = 1)
+    FROM LlmUsoConfig c
+    INNER JOIN LlmProviders groq ON groq.Id = c.FallbackProviderId
+    WHERE c.Finalidade IN ('spec_geracao', 'spec_estruturacao', 'spec_revisao')
+      AND groq.Kind = 'openai-compatible';
+  `);
+
   // ── Fix real (2026-08-21): a WIQL excluía chamados 'Closed' (encerrados), então o sync
   // deletava fisicamente qualquer chamado que fechasse — impossibilitando qualquer histórico
   // de "chamados encerrados". Migra bancos já existentes removendo só 'Closed' da exclusão

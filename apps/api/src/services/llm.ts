@@ -261,7 +261,16 @@ const TIMEOUT_MS: Record<LlmFinalidade, number> = {
   apf_geracao: 120_000, // subido de 90s pra 120s junto com o piso de tokens (ver REASONING_MIN_TOKENS)
   apf_refinamento: 120_000,
   spec_geracao: 90_000,
-  spec_estruturacao: 150_000, // 'high' reasoning_effort custa mais tempo de parede que 'medium'
+  // Subido de 150s pra 240s após falha real em produção (chamado #318120, 2026-09-14): o
+  // orçamento maior de [PATI] injetado na entrevista (ver PATI_INTERVIEW_BUDGET em chat.ts,
+  // 2000→20000 chars) e o contexto acumulado de entrevistas mais longas fazem o GPT-5.4
+  // (primário) precisar de mais tempo de parede pra estruturar a especificação — 150s não
+  // era mais suficiente, o timeout do primário forçava fallback pro Groq, que por sua vez
+  // estourava o limite de tokens/minuto da conta (TPM 8000, tier on_demand) com esse volume
+  // maior de contexto — os dois providers da cadeia falhavam. O SSE já tem heartbeat a cada
+  // 15s (ver startHeartbeat em documents.ts), então esperar mais tempo aqui não derruba a
+  // conexão do usuário.
+  spec_estruturacao: 240_000,
   spec_revisao: 60_000,
 };
 
