@@ -10,6 +10,16 @@ let _cachedContext: string | null = null;
 let _cachedAt = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Orçamento de caracteres para os comentários [PATI] injetados no prompt da entrevista.
+// INCIDENTE (chamado 318120, 2026-09-14): um único comentário [PATI] com 17205 chars (uma
+// especificação funcional completa colada pelo analista) era cortado por `keepMostRecentBlocks`
+// a apenas os ÚLTIMOS 2000 chars — a PATi só via o final do texto (seções de APF/diretrizes),
+// nunca o objetivo, habilitação, autenticação, jornada etc. descritos no início. A PATi parecia
+// ignorar o comentário sincronizado quando na verdade só enxergava ~12% dele. 20000 chars ainda
+// é pequeno perto da janela de contexto de qualquer provider configurado (Groq 128k tokens,
+// GPT-5.4 922k tokens de input).
+const PATI_INTERVIEW_BUDGET = 20000;
+
 // Mantém as mensagens mais RECENTES do histórico dentro de um orçamento de CARACTERES, em vez
 // de um número fixo de mensagens (ex.: as antigas history.slice(-10)/(-6)). Um corte por
 // CONTAGEM quebra entrevistas longas: cada turno de entrevista é 1 pergunta + 1 resposta (2
@@ -237,7 +247,7 @@ export async function queryForQuestion(
         if (wi.DiscussionPati) {
           // Mantém os comentários [PATI] MAIS RECENTES (não os mais antigos) quando o total
           // excede o orçamento — são os que costumam trazer a resposta final/confirmada.
-          const patiRecente = keepMostRecentBlocks(wi.DiscussionPati, '\n\n---\n\n', 1500);
+          const patiRecente = keepMostRecentBlocks(wi.DiscussionPati, '\n\n---\n\n', 6000);
           detail += `\nTag [PATI] presente: SIM\nComentários [PATI] (refinamentos registrados no DevOps):\n${patiRecente}${patiRecente.length < wi.DiscussionPati.length ? '...(comentários mais antigos omitidos)' : ''}\n`;
         } else {
           detail += `\nTag [PATI] presente: NÃO (nenhum comentário [PATI] registrado no DevOps para este chamado)\n`;
@@ -402,7 +412,7 @@ export async function getInterviewContext(workItemId: number, operatorProjects?:
     .trim()
     .slice(0, 1500);
 
-  const patiData = keepMostRecentBlocks((wi.DiscussionPati || '').trim(), '\n\n---\n\n', 2000);
+  const patiData = keepMostRecentBlocks((wi.DiscussionPati || '').trim(), '\n\n---\n\n', PATI_INTERVIEW_BUDGET);
   const hasPati = patiData.length > 0;
 
   return {
@@ -454,7 +464,7 @@ export async function* streamInterview(
 
   const tipoLabel = tipo === 'SPEC' ? 'Especificação de Negócio' : tipo === 'APF' ? 'APF (Análise de Pontos de Função)' : 'APF + Especificação de Negócio';
 
-  const patiData = keepMostRecentBlocks((wi.DiscussionPati || '').trim(), '\n\n---\n\n', 2000);
+  const patiData = keepMostRecentBlocks((wi.DiscussionPati || '').trim(), '\n\n---\n\n', PATI_INTERVIEW_BUDGET);
   const hasPati = patiData.length > 0;
   const hasDesc = descText.length > 0;
 

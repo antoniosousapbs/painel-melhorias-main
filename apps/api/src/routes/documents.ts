@@ -8,6 +8,7 @@ import { interviewHistoryToText } from '../utils/context.js';
 import { requireRole } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
 import { tryExtractUser } from '../utils/auth-user.js';
+import { refreshPatiComment } from '../services/devops-sync.js';
 
 const router = Router();
 
@@ -643,11 +644,16 @@ router.post('/sessions', async (req: Request, res: Response) => {
 
   const pool = await getPool();
 
-  // Mark stale sessions as abandoned (inactive > 30 min)
-  await pool.request().query(`
-    UPDATE InterviewSessions SET Status = 'abandoned'
-    WHERE Status = 'active' AND DATEDIFF(MINUTE, LastActivity, GETDATE()) > 30
-  `);
+  // Busca ao vivo o comentário [PATI] mais atual deste chamado ANTES de iniciar a entrevista
+  // (não depende mais da última sincronização geral — ver refreshPatiComment) em paralelo com
+  // a limpeza de sessões obsoletas, já que são independentes.
+  await Promise.all([
+    refreshPatiComment(workItemId),
+    pool.request().query(`
+      UPDATE InterviewSessions SET Status = 'abandoned'
+      WHERE Status = 'active' AND DATEDIFF(MINUTE, LastActivity, GETDATE()) > 30
+    `),
+  ]);
 
   // Check for active sessions from OTHER users for the same chamado+tipo
   const conflicts = await pool.request()
@@ -715,17 +721,21 @@ router.get('/sessions/resume', async (req: Request, res: Response) => {
   if (!user?.userId) return res.json({ resumable: false });
 
   const pool = await getPool();
-  const r = await pool.request()
-    .input('wid', sql.Int, wid)
-    .input('tipo', sql.NVarChar(10), tipo)
-    .input('uid', sql.NVarChar(200), user.userId)
-    .query(`
-      SELECT TOP 1 SessionId, TranscriptJson, LastActivity
-      FROM InterviewSessions
-      WHERE WorkItemId = @wid AND Tipo = @tipo AND UserId = @uid
-        AND Status IN ('active', 'abandoned') AND TranscriptJson IS NOT NULL
-      ORDER BY LastActivity DESC
-    `);
+  // Mesma garantia de frescor do [PATI] ao RETOMAR uma entrevista (não só ao iniciar uma nova).
+  const [r] = await Promise.all([
+    pool.request()
+      .input('wid', sql.Int, wid)
+      .input('tipo', sql.NVarChar(10), tipo)
+      .input('uid', sql.NVarChar(200), user.userId)
+      .query(`
+        SELECT TOP 1 SessionId, TranscriptJson, LastActivity
+        FROM InterviewSessions
+        WHERE WorkItemId = @wid AND Tipo = @tipo AND UserId = @uid
+          AND Status IN ('active', 'abandoned') AND TranscriptJson IS NOT NULL
+        ORDER BY LastActivity DESC
+      `),
+    refreshPatiComment(wid),
+  ]);
   const row = r.recordset[0];
   if (!row) return res.json({ resumable: false });
   let history: any[] = [];

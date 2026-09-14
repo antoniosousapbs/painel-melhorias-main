@@ -150,7 +150,7 @@ export default function Dashboard() {
   // Sincronização DevOps — disponível para todos os papéis
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<{
-    phase: 'fetching' | 'processing' | 'pati' | 'done' | 'error' | 'cancelled';
+    phase: 'fetching' | 'processing' | 'done' | 'error' | 'cancelled';
     current: number;
     total: number;
     message: string;
@@ -349,8 +349,6 @@ export default function Dashboard() {
         setSyncProgress({ phase: 'processing', current: 0, total: data.total, message: `Iniciando ${data.total} chamados...` });
       } else if (data.type === 'progress') {
         setSyncProgress({ phase: 'processing', current: data.current, total: data.total, message: `#${data.id} — ${data.title}` });
-      } else if (data.type === 'pati') {
-        setSyncProgress({ phase: 'pati', current: data.current, total: data.total, message: 'Buscando comentários [PATI]...' });
       } else if (data.type === 'done') {
         const msg = `Sync concluído: ${data.total} itens (${data.created} novos, ${data.updated} atualizados${data.canceled > 0 ? `, ${data.canceled} cancelados removidos` : ''})`;
         setSyncProgress({ phase: 'done', current: data.total, total: data.total, message: msg });
@@ -639,7 +637,7 @@ export default function Dashboard() {
 
         {/* Sincronizar — flui na mesma linha, logo após os filtros (sem empurrar pro canto) */}
         <div className="flex items-center gap-2">
-          {syncProgress && (syncProgress.phase === 'processing' || syncProgress.phase === 'pati' || syncProgress.phase === 'fetching') && (
+          {syncProgress && (syncProgress.phase === 'processing' || syncProgress.phase === 'fetching') && (
             <span className="hidden lg:inline text-[11px] text-txt-3 truncate max-w-[200px]" title={syncProgress.message}>
               {syncProgress.message}
             </span>
@@ -684,9 +682,8 @@ export default function Dashboard() {
               style={{
                 width: syncProgress.phase === 'fetching' ? '5%' :
                        syncProgress.phase === 'done' ? '100%' :
-                       syncProgress.phase === 'pati' ? '95%' :
                        syncProgress.total > 0
-                         ? `${Math.max(5, Math.round((syncProgress.current / syncProgress.total) * 90))}%`
+                         ? `${Math.max(5, Math.round((syncProgress.current / syncProgress.total) * 95))}%`
                          : '5%',
               }}
             />
