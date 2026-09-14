@@ -22,6 +22,12 @@ const config: sql.config = {
   user: process.env.DB_USER!,
   password: process.env.DB_PASSWORD!,
   port: parseInt(process.env.DB_PORT || '1433'),
+  // Padrão do driver (tedious) é 15000ms — baixo demais pra rotinas administrativas legítimas
+  // (ex.: sincronização DevOps: WIQL + lote de milhares de work items + limpeza de itens
+  // removidos com listas grandes de IDs). Erro real reproduzido localmente: "Timeout: Request
+  // failed to complete in 15000ms" no meio de uma sincronização de ~4600 chamados — a query em
+  // si não estava travada, só precisava de mais que 15s pra terminar.
+  requestTimeout: 120_000,
   options: {
     encrypt: false,
     trustServerCertificate: true,
