@@ -497,11 +497,13 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
                     if (r.spec) detail += ' | Spec ✓';
                     if (r.error) detail += ` | ❌ ${r.error}`;
                     lines.push(detail);
-                    // Abas nativas "Contagem"/"Funções" do template são limitadas a 10 elementos
-                    // (estrutura de tabela Excel fixa) — acima disso mostram um total incompleto,
-                    // menor que o real. "Memória de Cálculo" sempre reflete todos os elementos.
+                    // A listagem individual de elementos nas abas nativas "Contagem"/"Funções"
+                    // é limitada a 10 linhas (estrutura de tabela Excel fixa do template) — acima
+                    // disso, elementos extras não aparecem listados linha a linha ali (só na
+                    // "Memória de Cálculo"). Os TOTAIS dessas abas (PF/PFA/horas, breakdown por
+                    // tipo) já são corrigidos pelo backend pra refletir TODOS os elementos.
                     if (r.apf && r.apf.elementos > 10) {
-                      lines.push(`  ⚠️ ${r.apf.elementos} elementos — as abas nativas "Contagem"/"Funções" do Excel só mostram os 10 primeiros (total menor e incompleto); use a aba "Memória de Cálculo" para os ${r.apf.totalPF} PF / ${r.apf.totalHoras}h completos.`);
+                      lines.push(`  ℹ️ ${r.apf.elementos} elementos — os totais desta APF (${r.apf.totalPF} PF / ${r.apf.totalHoras}h) já refletem todos eles, mas a listagem linha a linha nas abas "Contagem"/"Funções" do Excel mostra só os 10 primeiros (a lista completa está na aba "Memória de Cálculo").`);
                     }
                   }
                 }

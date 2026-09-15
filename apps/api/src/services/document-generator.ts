@@ -517,6 +517,43 @@ export function calculateApf(elementos: ApfElement[], params: ApfParametros): Ap
   return { elementos: calculatedElements, totalPF, totalPFA, totalHoras, horasDetalhamento };
 }
 
+/**
+ * Agregados nativos da aba "Contagem"/"Funções" (Total PF, breakdown por tipo/operação,
+ * contagens por tipo/complexidade) — usados por `generateApfExcel` pra SOBRESCREVER as células
+ * agregadas nativas do template, que ficam incompletas quando há mais de 10 elementos (a Table3
+ * nativa — `xl/tables/table1.xml`, `ref="B10:AH21"` — só cobre 10 linhas de dados; ver
+ * comentário "Template supports up to 10 rows" mais abaixo em generateApfExcel). Calculado
+ * sobre TODOS os elementos, não só os 10 primeiros que cabem na Table3. As fórmulas nativas
+ * "downstream" dessas células (ex.: `AU11=SUM(AU8:AU10)`, `AY8=AU8*3`, `Z12=T12*V12`,
+ * `AI7=SUM(AY11+AY18+...)`) continuam sendo fórmulas normais dentro da MESMA planilha (nunca
+ * referenciam Table3 diretamente) e recalculam corretamente a partir dos valores corrigidos —
+ * não precisamos tocar nelas nem na estrutura da Table3 (arriscado: ver "ExcelJS corrupts the
+ * Table3 structured table" mais abaixo).
+ */
+function computeContagemAggregates(elementos: ApfElement[], params: ApfParametros) {
+  const deflator = (op: string) => op === 'I' ? params.DeflatorInclusao : op === 'A' ? params.DeflatorAlteracao : params.DeflatorExclusao;
+
+  // Contagem!T12/T13/T14 ("Tipo de Contagem": Desenvolvimento/Melhoria/Aplicação) — PF bruto por operação.
+  const porOperacaoRaw: Record<string, number> = { I: 0, A: 0, E: 0 };
+  // Funções!S8:AG8 ("Incluída/Alterada/Excluída" por tipo, na aba Contagem) — PFA por tipo+operação.
+  const porTipoOperacaoPFA: Record<string, number> = {};
+  // Contagem!AU8..AU35 ("Resumo da Contagem": Detalhada/Estimativa/Indicativa) — contagem por tipo+complexidade.
+  const porTipoComplexidade: Record<string, number> = {};
+
+  for (const el of elementos) {
+    porOperacaoRaw[el.operacao] = (porOperacaoRaw[el.operacao] || 0) + el.pf;
+
+    const keyOp = `${el.tipo}_${el.operacao}`;
+    const pfa = +(el.pf * deflator(el.operacao)).toFixed(2);
+    porTipoOperacaoPFA[keyOp] = +((porTipoOperacaoPFA[keyOp] || 0) + pfa).toFixed(2);
+
+    const keyComplex = `${el.tipo}_${el.complexidade}`;
+    porTipoComplexidade[keyComplex] = (porTipoComplexidade[keyComplex] || 0) + 1;
+  }
+
+  return { porOperacaoRaw, porTipoOperacaoPFA, porTipoComplexidade };
+}
+
 // ─── Generate APF for a work item ───
 export async function generateApf(
   workItemId: number,
@@ -1861,6 +1898,24 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
     { bold: false, text: descricaoCustomizacao },
   ], leftAlign[139]);
 
+  // Corrige "Tipo de Contagem" (Desenvolvimento/Melhoria/Aplicação) e "Resumo da Contagem"
+  // (Detalhada/Estimativa/Indicativa) pra refletirem TODOS os elementos, não só os 10 primeiros
+  // que cabem na Table3 nativa — ver computeContagemAggregates.
+  const { porOperacaoRaw, porTipoOperacaoPFA, porTipoComplexidade } = computeContagemAggregates(apf.elementos, params);
+  sheet1 = setCellValue(sheet1, 'T12', porOperacaoRaw.I);
+  sheet1 = setCellValue(sheet1, 'T13', porOperacaoRaw.A);
+  sheet1 = setCellValue(sheet1, 'T14', porOperacaoRaw.E);
+  const complexCellMap: Record<string, string> = {
+    EE_Baixa: 'AU8', EE_Media: 'AU9', EE_Alta: 'AU10',
+    SE_Baixa: 'AU14', SE_Media: 'AU15', SE_Alta: 'AU16',
+    CE_Baixa: 'AU21', CE_Media: 'AU22', CE_Alta: 'AU23',
+    ALI_Baixa: 'AU27', ALI_Media: 'AU28', ALI_Alta: 'AU29',
+    AIE_Baixa: 'AU33', AIE_Media: 'AU34', AIE_Alta: 'AU35',
+  };
+  for (const [key, cell] of Object.entries(complexCellMap)) {
+    sheet1 = setCellValue(sheet1, cell, porTipoComplexidade[key] || 0);
+  }
+
   // Remove cached formula values in Contagem to force recalculation
   const formulaCachePattern = /(<c r="[^"]*"[^>]*>(?:<f[^>]*>.*?<\/f>|<f[^/]*\/>))<v>[^<]*<\/v>/g;
   sheet1 = sheet1.replace(formulaCachePattern, '$1');
@@ -1925,6 +1980,21 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
     for (let r = 11; r <= 20; r++) {
       sheet2 = sheet2.replace(new RegExp(`<c r="${col}${r}" s="\\d+"`), `<c r="${col}${r}" s="${styleId}"`);
     }
+  }
+
+  // Corrige "Total de Pontos de Função"/"Total de Pontos de Função Ajustado" (F6/F7 — fonte de
+  // Contagem!Z17/Z18/Z20) e o breakdown "Incluída/Alterada/Excluída" por tipo (S8:AG8) pra
+  // refletirem TODOS os elementos, não só os 10 primeiros que cabem na Table3 nativa — ver
+  // computeContagemAggregates.
+  sheet2 = setCellValue(sheet2, 'F6', apf.totalPF);
+  sheet2 = setCellValue(sheet2, 'F7', apf.totalPFA);
+  const tipoOpCellMap: Record<string, string> = {
+    SE_E: 'S8', CE_E: 'T8', EE_E: 'U8', AIE_E: 'V8', ALI_E: 'W8',
+    SE_A: 'X8', CE_A: 'Y8', EE_A: 'Z8', AIE_A: 'AA8', ALI_A: 'AB8',
+    SE_I: 'AC8', CE_I: 'AD8', EE_I: 'AE8', AIE_I: 'AF8', ALI_I: 'AG8',
+  };
+  for (const [key, cell] of Object.entries(tipoOpCellMap)) {
+    sheet2 = setCellValue(sheet2, cell, porTipoOperacaoPFA[key] || 0);
   }
 
   // Remove cached formula values in data rows to force recalculation
