@@ -17,11 +17,15 @@ interface Message {
   content: string;
 }
 
-/** Horário com milissegundos (ex: "15:15:56.123") — diferencia turnos que aconteceram no mesmo
- * segundo (respostas rápidas), o que `toLocaleTimeString` sozinho não distingue. */
+/** Data + horário com milissegundos (ex: "14/09/2026 15:15:56.123") — usado só para compilar o
+ * `interviewContext` (nunca pra exibição na tela). Diferencia turnos que aconteceram no mesmo
+ * segundo (respostas rápidas, o que `toLocaleTimeString` sozinho não distingue) E identifica em
+ * qual DIA cada turno ocorreu — sem a data, o PDF de Auditoria (que só recebe esse texto
+ * compilado, sem acesso ao objeto Date original) não tinha como mostrar quando, só a que horas,
+ * uma entrevista que se estendeu por mais de um dia realmente aconteceu. */
 function formatHoraComMs(iso: string): string {
   const d = new Date(iso);
-  return `${d.toLocaleTimeString('pt-BR')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  return `${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
 }
 
 type InterviewState = { active: boolean; workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean };

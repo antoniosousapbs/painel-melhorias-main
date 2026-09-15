@@ -211,7 +211,14 @@ function parseInteracaoTurns(raw: string | null | undefined): { role: 'PATi' | '
       turnos.push({ role: 'Analista', texto: linha });
     }
   }
-  return turnos.filter(t => t.texto.length > 0);
+  // Trunca cada turno individualmente — sem isso, um único turno muito longo (ex.: a PATi
+  // ecoando de volta um resumo estruturado inteiro) gera um balão maior que uma página do PDF;
+  // como o retângulo do balão é desenhado com altura FIXA (calculada uma vez) mas o texto usa
+  // `.text()` do PDFKit (que pagina automaticamente quando não cabe), o texto continuava a
+  // fluir pra página seguinte SEM o balão/avatar, ficando visualmente solto e fora de formato.
+  return turnos
+    .filter(t => t.texto.length > 0)
+    .map(t => ({ ...t, texto: truncateForSheet(t.texto, 2000, 'histórico completo da entrevista no sistema') }));
 }
 
 /** Iniciais (até 2 letras) pra avatar do Analista no chat do PDF de Auditoria — 1ª letra do
@@ -1495,8 +1502,12 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
     xf(fSection, 0, bSectionUnderline, 'left', 'center', false), // 4 section
     xf(fChip, fillTableHdr, bFieldBoxFirst, 'center', 'center'), // 5 fieldLabelFirst
     xf(fChip, fillTableHdr, bFieldBoxRest, 'center', 'center'), // 6 fieldLabelRest
-    xf(fBody, 0, bFieldBoxFirst, 'justify', 'center'), // 7 fieldCardFirst
-    xf(fBody, 0, bFieldBoxRest, 'justify', 'center'), // 8 fieldCardRest
+    // 'top' (não 'center'): a altura da linha é estimada a partir do texto (pode sobrar folga
+    // quando a estimativa é conservadora pra nunca cortar conteúdo — ver estimateWrappedLinesMultiline)
+    // — com vertical=center essa folga vira um espaço em branco grande ANTES do texto começar,
+    // pior visualmente que a mesma folga sobrando no final do card.
+    xf(fBody, 0, bFieldBoxFirst, 'justify', 'top'), // 7 fieldCardFirst
+    xf(fBody, 0, bFieldBoxRest, 'justify', 'top'), // 8 fieldCardRest
     xf(fBodyBold, fillTableHdr, bTopStrong, 'center', 'center', false), // 9 tableHeaderFirst
     xf(fBodyBold, fillTableHdr, bTopFirstRow, 'center', 'center', false), // 10 tableHeader
     xf(fBody, 0, bTopFirstRow, 'left', 'center'), // 11 dataFirstLeft
@@ -1985,6 +1996,15 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // ─── Aba Funções (sheet2.xml) ───
   let sheet2 = await zip.file('xl/worksheets/sheet2.xml')!.async('string');
 
+  // A linha 20 do template original não tem célula AH20 (Observações) — só as linhas 11-19 têm.
+  // setCellValue() edita células EXISTENTES, nunca insere uma ausente, então a justificativa do
+  // elemento que cair exatamente na linha 20 nunca era escrita (bug real: 10º/20º/... elemento
+  // sempre aparecia sem comentário). Insere a célula ausente (mesmo estilo de AH19) antes de
+  // qualquer outra edição na aba.
+  if (!/<c r="AH20"/.test(sheet2)) {
+    sheet2 = sheet2.replace(/(<c r="AG20"[^>]*>[\s\S]*?<\/c>)(<\/row>)/, '$1<c r="AH20" s="103"/>$2');
+  }
+
   // Table3 nativa só tem 10 linhas de dados no template original — expande dinamicamente
   // quando há mais elementos, em vez de descartar os excedentes (ver expandFuncoesTableIfNeeded).
   const { sheet2: sheet2Expandido, extraRows, lastDataRow } = expandFuncoesTableIfNeeded(sheet2, apf.elementos.length);
@@ -2363,7 +2383,13 @@ export async function generateApfAuditoriaPdf(workItemId: number): Promise<Buffe
         const naturalWidth = doc.widthOfString(t.texto);
         doc.font('Helvetica-Bold').fontSize(NAME_SIZE);
         const nameWidth = doc.widthOfString(nome);
-        const contentWidth = Math.min(maxContentWidth, Math.max(naturalWidth, nameWidth, 46));
+        // Horário agora inclui a DATA (ex.: "14/09/2026 20:31:27.074"), bem mais largo que só a
+        // hora — precisa entrar no cálculo da largura do balão, senão um balão estreito (mensagem
+        // curta tipo "sim") força o horário a quebrar em 2 linhas, o que `timeLineHeight` (altura
+        // fixa de 1 linha) não previa, cortando visualmente o horário na borda do balão.
+        doc.fontSize(TIME_SIZE).font('Helvetica');
+        const timeWidth = t.horario ? doc.widthOfString(t.horario) : 0;
+        const contentWidth = Math.min(maxContentWidth, Math.max(naturalWidth, nameWidth, timeWidth, 46));
         const bubbleWidth = contentWidth + BUBBLE_PAD_X * 2;
 
         doc.font('Helvetica').fontSize(BODY_SIZE);
