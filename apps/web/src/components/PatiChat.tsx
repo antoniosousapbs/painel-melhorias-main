@@ -497,6 +497,12 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
                     if (r.spec) detail += ' | Spec ✓';
                     if (r.error) detail += ` | ❌ ${r.error}`;
                     lines.push(detail);
+                    // Abas nativas "Contagem"/"Funções" do template são limitadas a 10 elementos
+                    // (estrutura de tabela Excel fixa) — acima disso mostram um total incompleto,
+                    // menor que o real. "Memória de Cálculo" sempre reflete todos os elementos.
+                    if (r.apf && r.apf.elementos > 10) {
+                      lines.push(`  ⚠️ ${r.apf.elementos} elementos — as abas nativas "Contagem"/"Funções" do Excel só mostram os 10 primeiros (total menor e incompleto); use a aba "Memória de Cálculo" para os ${r.apf.totalPF} PF / ${r.apf.totalHoras}h completos.`);
+                    }
                   }
                 }
                 // Erro real (não exceção de rede) — a entrevista NÃO é limpa pelo chamador

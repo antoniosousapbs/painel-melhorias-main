@@ -435,7 +435,7 @@ router.post('/generate/stream', async (req: Request, res: Response) => {
   let current = 0;
   let generated = 0;
   let errors = 0;
-  const results: { id: number; title: string; apf?: { totalPF: number; totalHoras: number }; spec?: boolean; error?: string }[] = [];
+  const results: { id: number; title: string; apf?: { totalPF: number; totalHoras: number; elementos: number }; spec?: boolean; error?: string }[] = [];
 
   startHeartbeat();
   for (const item of itemsToProcess) {
@@ -494,11 +494,12 @@ router.post('/generate/stream', async (req: Request, res: Response) => {
           title: item.Title,
           totalPF: result.apf.totalPF,
           totalHoras: result.apf.totalHoras,
+          elementos: result.apf.elementos.length,
           elapsed,
         });
         const existing = results.find(r => r.id === item.Id);
-        if (existing) existing.apf = { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras };
-        else results.push({ id: item.Id, title: item.Title, apf: { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras } });
+        if (existing) existing.apf = { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras, elementos: result.apf.elementos.length };
+        else results.push({ id: item.Id, title: item.Title, apf: { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras, elementos: result.apf.elementos.length } });
       } catch (err: any) {
         errors++;
         send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'APF', message: err.message });
