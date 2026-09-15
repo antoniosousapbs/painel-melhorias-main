@@ -1292,6 +1292,54 @@ function estimateWrappedLinesMultiline(text: string, charsPerLine: number): numb
   return text.split('\n').reduce((sum, segment) => sum + Math.max(1, Math.ceil(segment.length / charsPerLine)), 0);
 }
 
+// Larguras médias de caractere (em milésimos de "em", métricas padrão Helvetica/Arial — bem
+// próximas da Calibri usada no relatório) para os cartões do "Resumo Executivo" da Memória de
+// Cálculo. Substitui a heurística antiga (largura da coluna × fator fixo 0.75), que tratava
+// TODO caractere como se tivesse a MESMA largura — isso superestimava MUITO o nº de linhas
+// necessárias (um texto real tem muitas letras estreitas — i, l, espaço — que ocupam bem menos
+// que a média assumida), deixando uma sobra de várias linhas em branco no cartão (bug real
+// reportado: "espaço em branco" antes/depois do texto). Simular a quebra de linha palavra por
+// palavra, com a largura real de cada caractere, estima a altura necessária com muito mais
+// precisão, sem cair no erro oposto (cortar texto) que motivou o fator 0.75 no passado.
+const CHAR_WIDTH_1000: Record<string, number> = {
+  i: 222, l: 222, j: 222, I: 278, '.': 278, ',': 278, "'": 180, ':': 278, ';': 278, '!': 278, '|': 260, ' ': 278, '"': 355,
+  f: 333, t: 278, r: 333, '(': 333, ')': 333, '-': 333, '/': 278,
+  m: 833, w: 722, M: 889, W: 944,
+};
+function charWidth1000(ch: string): number {
+  if (ch in CHAR_WIDTH_1000) return CHAR_WIDTH_1000[ch];
+  if (/[0-9]/.test(ch)) return 556;
+  if (/[A-ZÀ-Þ]/.test(ch)) return 667;
+  return 500; // minúsculas/acentuadas e pontuação/símbolos não mapeados — largura média
+}
+
+/** Estima nº de linhas simulando a quebra de linha palavra por palavra (wrap real, não uma
+ * razão fixa caracteres/linha) — `availableWidthPt` já deve estar em pontos (não em "unidades
+ * de largura de coluna" do Excel; ver conversão no chamador). */
+function estimateWrappedLinesByWidth(text: string, availableWidthPt: number, fontSizePt: number): number {
+  if (!text) return 1;
+  const wordWidthPt = (word: string) => [...word].reduce((sum, ch) => sum + charWidth1000(ch), 0) / 1000 * fontSizePt;
+  const spaceWidthPt = charWidth1000(' ') / 1000 * fontSizePt;
+  let total = 0;
+  for (const paragrafo of text.split('\n')) {
+    if (!paragrafo) { total += 1; continue; }
+    let lineWidth = 0;
+    let linhas = 1;
+    for (const palavra of paragrafo.split(' ')) {
+      const w = wordWidthPt(palavra);
+      const add = lineWidth === 0 ? w : w + spaceWidthPt;
+      if (lineWidth > 0 && lineWidth + add > availableWidthPt) {
+        linhas++;
+        lineWidth = w;
+      } else {
+        lineWidth += add;
+      }
+    }
+    total += linhas;
+  }
+  return Math.max(1, total);
+}
+
 // Clona entradas de cellXfs (styles.xml) adicionando vertical="center", preservando fonte/
 // preenchimento/borda/horizontal originais — usado para centralizar verticalmente colunas do
 // template que originalmente não tinham esse atributo (ficam "coladas" embaixo quando a altura
@@ -1502,12 +1550,11 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
     xf(fSection, 0, bSectionUnderline, 'left', 'center', false), // 4 section
     xf(fChip, fillTableHdr, bFieldBoxFirst, 'center', 'center'), // 5 fieldLabelFirst
     xf(fChip, fillTableHdr, bFieldBoxRest, 'center', 'center'), // 6 fieldLabelRest
-    // 'top' (não 'center'): a altura da linha é estimada a partir do texto (pode sobrar folga
-    // quando a estimativa é conservadora pra nunca cortar conteúdo — ver estimateWrappedLinesMultiline)
-    // — com vertical=center essa folga vira um espaço em branco grande ANTES do texto começar,
-    // pior visualmente que a mesma folga sobrando no final do card.
-    xf(fBody, 0, bFieldBoxFirst, 'justify', 'top'), // 7 fieldCardFirst
-    xf(fBody, 0, bFieldBoxRest, 'justify', 'top'), // 8 fieldCardRest
+    // 'center' (não 'top'): agora que a altura é estimada com largura real de caractere
+    // (estimateWrappedLinesByWidth), a sobra é pequena (~1 linha) — centralizado fica melhor
+    // visualmente e consistente com o resto da Memória de Cálculo (chip/label também é center).
+    xf(fBody, 0, bFieldBoxFirst, 'justify', 'center'), // 7 fieldCardFirst
+    xf(fBody, 0, bFieldBoxRest, 'justify', 'center'), // 8 fieldCardRest
     xf(fBodyBold, fillTableHdr, bTopStrong, 'center', 'center', false), // 9 tableHeaderFirst
     xf(fBodyBold, fillTableHdr, bTopFirstRow, 'center', 'center', false), // 10 tableHeader
     xf(fBody, 0, bTopFirstRow, 'left', 'center'), // 11 dataFirstLeft
@@ -1635,18 +1682,23 @@ function buildStyledSheetXml(rows: SheetRow[], colWidths: number[], ids: ReportS
     // renderiza — célula dentro do intervalo mesclado usa a largura do intervalo todo, célula
     // fora dele usa só a largura da própria coluna (ex.: "Processo Elementar", coluna C sozinha,
     // bem mais estreita que o card de "Justificativa de Negócio" mesclado D:K — estimar as duas
-    // pela largura do card subestimava a altura necessária pra coluna estreita). Fator reduzido
-    // (0.75, não 1:1): largura de coluna do Excel não equivale a nº de caracteres pra qualquer
-    // fonte/peso (negrito ocupa mais) — superestimar caracteres por linha cortava o texto
-    // (alinhado ao topo, cortava o fim; antes, centralizado, cortava os dois lados).
+    // pela largura do card subestimava a altura necessária pra coluna estreita).
     const mergedWidth = row.mergeFrom !== undefined
       ? colWidths.slice(row.mergeFrom).reduce((a, b) => a + b, 0)
       : null;
+    // 1 unidade de largura de coluna do Excel ≈ 7px (MDW do Calibri 11, fonte padrão do
+    // workbook) ≈ 5.25pt (a 96dpi) — usado só pelo estimador por largura real de caractere
+    // (band 'field'); as demais bandas continuam com o fator fixo antigo (0.75), mais
+    // conservador mas já validado nelas, pra não arriscar regressão fora do que foi reportado.
+    const EXCEL_WIDTH_UNIT_TO_PT = 5.25;
     const lines = row.cells.reduce((maxLines: number, val, ci) => {
       if (typeof val !== 'string' || !val) return maxLines;
       const cellWidth = (mergedWidth !== null && row.mergeFrom !== undefined && ci >= row.mergeFrom)
         ? mergedWidth
         : (colWidths[ci] ?? 55);
+      if (row.band === 'field') {
+        return Math.max(maxLines, estimateWrappedLinesByWidth(val, cellWidth * EXCEL_WIDTH_UNIT_TO_PT, 9));
+      }
       const charsPerLine = Math.max(1, Math.round(cellWidth * 0.75));
       return Math.max(maxLines, estimateWrappedLinesMultiline(val, charsPerLine));
     }, 1);
