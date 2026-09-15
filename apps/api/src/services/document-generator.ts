@@ -2226,6 +2226,23 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   }
   zip.file('xl/workbook.xml', workbook);
 
+  // ─── Fix Table3: borda esquerda preta/grossa (tableBorderDxfId) não bate com o resto ───
+  // O template original define, no dxf usado como "tableBorderDxfId" da Table3 (dxf índice 49
+  // em xl/styles.xml), uma borda ESQUERDA "medium" preta (indexed=8) + borda INFERIOR "hair"
+  // preta — diferente de TODOS os outros elementos de estilo da tabela (headerRow/firstColumn/
+  // lastColumn/wholeTable), que usam borda "thin" na cor rosa/vermelho claro (FFFF5B5B), e da
+  // linha de cabeçalho da tabela principal, que usa "thin" laranja (FFC00000). Isso cria uma
+  // borda preta grossa visível na lateral esquerda da Table3 (coluna B) destoando do resto do
+  // relatório. Confirmado que dxf 49 só é referenciado por tableBorderDxfId="49" (nenhuma
+  // conditionalFormatting ou outro estilo usa esse índice) — seguro trocar pra "thin" laranja,
+  // igual ao cabeçalho da tabela (dxf 51, headerRowDxfId), sem afetar mais nada no template.
+  let stylesFinalPre = await zip.file('xl/styles.xml')!.async('string');
+  stylesFinalPre = stylesFinalPre.replace(
+    '<dxf><border outline="0"><left style="medium"><color indexed="8"/></left><bottom style="hair"><color indexed="8"/></bottom></border></dxf>',
+    '<dxf><border outline="0"><left style="thin"><color rgb="FFC00000"/></left><bottom style="thin"><color rgb="FFC00000"/></bottom></border></dxf>',
+  );
+  zip.file('xl/styles.xml', stylesFinalPre);
+
   // ─── Fix Table3: disable row stripes (causes inconsistent bold) ───
   let table1 = await zip.file('xl/tables/table1.xml')!.async('string');
   table1 = table1.replace('showRowStripes="1"', 'showRowStripes="0"');
