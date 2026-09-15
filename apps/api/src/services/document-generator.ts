@@ -554,6 +554,66 @@ function computeContagemAggregates(elementos: ApfElement[], params: ApfParametro
   return { porOperacaoRaw, porTipoOperacaoPFA, porTipoComplexidade };
 }
 
+/**
+ * Expande a Table3 nativa (aba "Funções") pra caber mais de 10 elementos, clonando a linha 19
+ * do template (a única das 10 linhas originais com fórmulas NORMAIS — não "shared" — e com
+ * todas as colunas presentes, inclusive AH/Observações, que falta na linha 20) uma vez por
+ * elemento extra, e deslocando pra baixo a linha de totais (21) e as linhas de preenchimento
+ * puramente visuais (22-44, sem fórmula/conteúdo) que existem no template abaixo da tabela.
+ * `renumberRow` funciona tanto pra clonar (linha 19 → nova linha N) quanto pra deslocar (linha
+ * 21 → 21+extra) porque só troca referências "COLUNA+número" que começam com letra maiúscula
+ * — não toca em constantes numéricas soltas (ex.: os limiares "<=19"/">=51" da fórmula de
+ * complexidade IFPUG) nem em referências absolutas de outra aba (ex.: "Contagem!$Z$19", que tem
+ * "$" entre a coluna e a linha, então o texto literal "Z19" nunca aparece ali).
+ */
+function expandFuncoesTableIfNeeded(sheet2: string, totalElementos: number): { sheet2: string; extraRows: number; lastDataRow: number } {
+  const extraRows = Math.max(0, totalElementos - 10);
+  if (extraRows === 0) return { sheet2, extraRows: 0, lastDataRow: 20 };
+
+  const templateRowMatch = sheet2.match(/<row r="19"[^>]*>[\s\S]*?<\/row>/);
+  if (!templateRowMatch) throw new Error('Linha-molde (19) não encontrada na aba Funções — o template pode ter mudado.');
+  const row20Match = sheet2.match(/<row r="20"[^>]*>[\s\S]*?<\/row>/);
+  if (!row20Match) throw new Error('Linha 20 não encontrada na aba Funções — o template pode ter mudado.');
+
+  const renumberRow = (rowXml: string, oldRow: number, newRow: number): string => {
+    let out = rowXml.replace(new RegExp(`^<row r="${oldRow}"`), `<row r="${newRow}"`);
+    out = out.replace(new RegExp(`([A-Z]{1,2})${oldRow}\\b`, 'g'), (_m, col: string) => `${col}${newRow}`);
+    return out;
+  };
+
+  // Linhas 21+ existentes no template (linha de totais + preenchimento visual abaixo dela) —
+  // extraídas ANTES de qualquer alteração, pra deslocar cada uma pra sua nova posição.
+  const rowsToShift: { oldRow: number; xml: string }[] = [];
+  let maxRow = 20;
+  for (const m of sheet2.matchAll(/<row r="(\d+)"[^>]*>[\s\S]*?<\/row>/g)) {
+    const rowNum = parseInt(m[1]);
+    if (rowNum >= 21) {
+      rowsToShift.push({ oldRow: rowNum, xml: m[0] });
+      if (rowNum > maxRow) maxRow = rowNum;
+    }
+  }
+
+  let novo = sheet2;
+  for (const { xml } of rowsToShift) novo = novo.replace(xml, '');
+
+  const linhasNovas: string[] = [];
+  for (let i = 1; i <= extraRows; i++) linhasNovas.push(renumberRow(templateRowMatch[0], 19, 20 + i));
+  for (const { oldRow, xml } of rowsToShift.sort((a, b) => a.oldRow - b.oldRow)) {
+    linhasNovas.push(renumberRow(xml, oldRow, oldRow + extraRows));
+  }
+
+  novo = novo.replace(row20Match[0], row20Match[0] + linhasNovas.join(''));
+
+  const lastDataRow = 20 + extraRows;
+  // Validação (tipo/dropdown I-A-E) e formatação condicional (cor por I/A/E) precisam cobrir
+  // as linhas novas, senão só as 10 primeiras linham ganham o dropdown/cor.
+  novo = novo.replace(/sqref="D13:D20"/, `sqref="D13:D${lastDataRow}"`);
+  novo = novo.replace(/sqref="E11:E20"/g, `sqref="E11:E${lastDataRow}"`);
+  novo = novo.replace(/<dimension ref="B1:AW\d+"\/>/, `<dimension ref="B1:AW${maxRow + extraRows}"/>`);
+
+  return { sheet2: novo, extraRows, lastDataRow };
+}
+
 // ─── Generate APF for a work item ───
 export async function generateApf(
   workItemId: number,
@@ -1925,16 +1985,22 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // ─── Aba Funções (sheet2.xml) ───
   let sheet2 = await zip.file('xl/worksheets/sheet2.xml')!.async('string');
 
+  // Table3 nativa só tem 10 linhas de dados no template original — expande dinamicamente
+  // quando há mais elementos, em vez de descartar os excedentes (ver expandFuncoesTableIfNeeded).
+  const { sheet2: sheet2Expandido, extraRows, lastDataRow } = expandFuncoesTableIfNeeded(sheet2, apf.elementos.length);
+  sheet2 = sheet2Expandido;
+
   // Replace "Empresa: DOCOL" in B5 with actual client name
   sheet2 = setCellValue(sheet2, 'B5', `Empresa: ${wi.ClienteNome || 'N/A'}`, newStrings, existingCount);
   // B7 ("Projeto") era texto fixo no template ("Projeto: HPF Data de Programação"), nunca
   // substituído — sempre aparecia igual em toda planilha gerada. Agora reflete o chamado real.
   sheet2 = setCellValue(sheet2, 'B7', `Projeto: #${wi.Id} - ${wi.Title}`, newStrings, existingCount);
 
-  // Fill elements into rows 11-20 (text via shared strings, numbers direct)
+  // Fill elements into rows 11..lastDataRow (text via shared strings, numbers direct) — sem
+  // teto fixo: expandFuncoesTableIfNeeded já garantiu que existem linhas suficientes acima.
   apf.elementos.forEach((el, idx) => {
     const row = 11 + idx;
-    if (row > 20) return; // Template supports up to 10 rows
+    if (row > lastDataRow) return;
     sheet2 = setCellValue(sheet2, `B${row}`, el.processo, newStrings, existingCount);
     sheet2 = setCellValue(sheet2, `D${row}`, el.tipo, newStrings, existingCount);
     sheet2 = setCellValue(sheet2, `E${row}`, el.operacao, newStrings, existingCount);
@@ -1956,14 +2022,14 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // Fix column D (Tipo) alignment: original styles 117/124 have numFmtId=4 (number format)
   // which causes Excel to ignore horizontal alignment for text values. Style 2 (used by col E)
   // has numFmtId=0 + center alignment and works correctly — usamos o clone com vertical=center.
-  for (let r = 11; r <= 20; r++) {
+  for (let r = 11; r <= lastDataRow; r++) {
     sheet2 = sheet2.replace(new RegExp(`<c r="D${r}" s="\\d+"`), `<c r="D${r}" s="${vCenter[2]}"`);
   }
 
   // Normalize column B styles: original uses mix of 125/124/122/121/104 causing
   // inconsistent appearance. Use style 104 (left, fontId=13 non-bold, wrapText) for all
   // (104 já tem vertical="center" no template original).
-  for (let r = 11; r <= 20; r++) {
+  for (let r = 11; r <= lastDataRow; r++) {
     sheet2 = sheet2.replace(new RegExp(`<c r="B${r}" s="\\d+"`), `<c r="B${r}" s="104"`);
   }
 
@@ -1977,7 +2043,7 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
     M: vCenter[84], N: forceCenter[85], O: forceCenter[85], P: forceCenter[85], Q: forceCenter[85],
   };
   for (const [col, styleId] of Object.entries(colunasParaCentralizar)) {
-    for (let r = 11; r <= 20; r++) {
+    for (let r = 11; r <= lastDataRow; r++) {
       sheet2 = sheet2.replace(new RegExp(`<c r="${col}${r}" s="\\d+"`), `<c r="${col}${r}" s="${styleId}"`);
     }
   }
@@ -2091,6 +2157,13 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // ─── Fix Table3: disable row stripes (causes inconsistent bold) ───
   let table1 = await zip.file('xl/tables/table1.xml')!.async('string');
   table1 = table1.replace('showRowStripes="1"', 'showRowStripes="0"');
+  // Expande o range da Table3 pra cobrir as linhas extras inseridas em sheet2 (ver
+  // expandFuncoesTableIfNeeded) — a linha de totais nativa (SUBTOTAL sobre Table3[coluna])
+  // se ajusta sozinha, pois SUBTOTAL sobre uma referência estruturada acompanha o tamanho
+  // atual da tabela automaticamente, sem precisar editar as fórmulas de totais.
+  if (extraRows > 0) {
+    table1 = table1.replace(/ref="B10:AH21"/, `ref="B10:AH${21 + extraRows}"`);
+  }
   zip.file('xl/tables/table1.xml', table1);
 
   // ─── Update sharedStrings.xml with new strings ───

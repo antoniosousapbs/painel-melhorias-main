@@ -252,6 +252,20 @@ async function main() {
   if (cellValue(manySheet1, 'T13') !== 48) fail(`Contagem!T13 (Melhoria/Alteração, PF bruto) = ${cellValue(manySheet1, 'T13')}, esperado 48.`);
   console.log('✅ Agregados de Contagem/Funções (Total PF/PFA, Tipo de Contagem) corretos com 14 elementos (acima do limite de 10 da Table3 nativa).');
 
+  // ── 9. Table3 nativa expandida — as 14 linhas aparecem INDIVIDUALMENTE (não só nos
+  // agregados), a linha de totais foi deslocada e a validação/formatação condicional passou
+  // a cobrir o intervalo novo ──
+  if (!manySheet2.match(/ref="B10:AH25"/) && !(await manyZip.file('xl/tables/table1.xml')!.async('string')).includes('ref="B10:AH25"')) {
+    fail('Table3 (xl/tables/table1.xml) não foi expandida para "B10:AH25" (10 linhas originais + 4 extras) — elementos além do 10º continuariam invisíveis individualmente.');
+  }
+  for (let i = 0; i < MANY_ELEMENTOS.length; i++) {
+    const row = 11 + i;
+    if (!manySheet2.includes(`r="D${row}"`)) fail(`Linha ${row} (elemento #${i + 1}) não existe na aba Funções — elementos além do 10º devem ganhar linhas novas, não desaparecer.`);
+  }
+  if (!manySheet2.match(/<row r="25"[^>]*>[\s\S]*?SUBTOTAL\(109,Table3\[PF\]\)/)) fail('Linha de totais (SUBTOTAL) não foi deslocada corretamente pra linha 25 após inserir as 4 linhas extras.');
+  if (!manySheet2.includes('sqref="D13:D24"') || !manySheet2.includes('sqref="E11:E24"')) fail('Validação de dados (dropdown Tipo/I-A-E) não foi expandida pra cobrir as linhas novas (21-24).');
+  console.log('✅ Table3 expandida corretamente — todas as 14 linhas aparecem individualmente na aba Funções, totais e validações deslocados.');
+
   console.log('\n🎉 Todas as verificações passaram — template Excel sem regressão.');
   process.exit(0);
 }
