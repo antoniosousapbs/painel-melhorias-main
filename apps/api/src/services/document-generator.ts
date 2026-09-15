@@ -1531,11 +1531,15 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
     box('FFC9CFD8', null), // 3 caixa fechada — topo 1ª linha de tabela (cabeçalho)
     box('FF7C8798', null), // 4 caixa fechada — topo linha TOTAL
     box(null, 'FFC9CFD8'), // 5 caixa fechada — nota de vigência
+    // Sem topo: usado só nos campos "mid" do Resumo Executivo — a borda inferior do card
+    // anterior já separa os dois, então um topo aqui só duplicava a linha (usuário pediu pra
+    // tirar essa borda extra que "não precisa existir").
+    `<border><left ${hair('FFD9DEE7')}left><right ${hair('FFD9DEE7')}right><top/><bottom ${hair('FFD9DEE7')}bottom><diagonal/></border>`, // 6 caixa sem topo
   ];
-  const [bSectionUnderline, bTopStrong, bTopHair, bTopFirstRow, bTopTotal, bDisclaimer] = newBorders.map((_, i) => bordersCount + i);
-  // Chip/card das linhas de campo usam a MESMA caixa fechada de topo forte/fino (bTopStrong/
-  // bTopHair) — antes tinham borda própria incompleta (só topo/direita); unificado.
-  const bFieldBoxFirst = bTopStrong, bFieldBoxRest = bTopHair;
+  const [bSectionUnderline, bTopStrong, bTopHair, bTopFirstRow, bTopTotal, bDisclaimer, bNoTop] = newBorders.map((_, i) => bordersCount + i);
+  // Só o 1º campo ("O que foi solicitado") mantém a caixa fechada com topo forte — os demais
+  // ("mid") não têm topo, pra não duplicar a borda inferior do card anterior.
+  const bFieldBoxFirst = bTopStrong, bFieldBoxRest = bNoTop;
   out = out.replace(bordersSection[0], `<borders count="${bordersCount + newBorders.length}">${bordersSection[2]}${newBorders.join('')}</borders>`);
 
   const cellXfsSection = out.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/)!;
@@ -1702,12 +1706,17 @@ function buildStyledSheetXml(rows: SheetRow[], colWidths: number[], ids: ReportS
       const charsPerLine = Math.max(1, Math.round(cellWidth * 0.75));
       return Math.max(maxLines, estimateWrappedLinesMultiline(val, charsPerLine));
     }, 1);
+    // +1 linha de folga só na band 'field': a estimativa por largura de caractere é precisa,
+    // mas "exata" (sem sobra) deixa o texto colado nas bordas de cima/baixo do card, dando
+    // impressão de corte — 1 linha extra garante respiro visual em TODOS os campos do Resumo
+    // Executivo, igual ao que já acontecia (por acaso, efeito de arredondamento) só no 1º campo.
+    const linesWithSlack = row.band === 'field' && lines > 1 ? lines + 1 : lines;
     // Teto real do Excel pra altura de uma única linha é ~409pt (limite da UI) — usar um teto
     // bem menor (250) cortava visualmente textos longos (ex.: solicitação compilada de várias
     // entrevistas) no meio da frase, sem nenhum aviso pro usuário de que faltava conteúdo.
     const heightAttr = row.height
       ? ` ht="${row.height}" customHeight="1"`
-      : lines > 1 ? ` ht="${Math.min(lines * 14, 409)}" customHeight="1"` : '';
+      : linesWithSlack > 1 ? ` ht="${Math.min(linesWithSlack * 14, 409)}" customHeight="1"` : '';
 
 
     return `<row r="${r}"${heightAttr}>${cells}</row>`;
@@ -2241,6 +2250,17 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
     '<dxf><border outline="0"><left style="medium"><color indexed="8"/></left><bottom style="hair"><color indexed="8"/></bottom></border></dxf>',
     '<dxf><border outline="0"><left style="thin"><color rgb="FFC00000"/></left><bottom style="thin"><color rgb="FFC00000"/></bottom></border></dxf>',
   );
+  // ─── Fix: bordas rosa/vermelho-claro (caixas de identificação/resumo em Contagem e Funções)
+  // não batem com o laranja usado no resto do relatório ───
+  // O template usa DUAS cores de borda "vermelha" diferentes: FFC00000 (laranja escuro, usado
+  // no cabeçalho da tabela principal de elementos) e FFFF5B5B/FFFF4F4F (rosa/vermelho claro,
+  // usado nas caixas de "Total de Pontos de Função/Custos", "Tipo de Contagem" etc.). Usuário
+  // confirmou (2 rodadas de screenshot) que quer TODAS as bordas iguais — não só a borda da
+  // Table3 (já corrigida acima). Confirmado que essas duas cores só aparecem em contexto de
+  // BORDA (<left>/<right>/<top>/<bottom>/<vertical>/<horizontal>), nunca em fonte ou
+  // preenchimento — troca textual segura em todo o styles.xml, sem risco de mudar cor de
+  // texto/fundo em nenhum lugar.
+  stylesFinalPre = stylesFinalPre.replace(/FFFF5B5B/g, 'FFC00000').replace(/FFFF4F4F/g, 'FFC00000');
   zip.file('xl/styles.xml', stylesFinalPre);
 
   // ─── Fix Table3: disable row stripes (causes inconsistent bold) ───
