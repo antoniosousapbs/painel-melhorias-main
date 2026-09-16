@@ -677,7 +677,10 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           // entrevista/encerra a sessão DEPOIS de confirmado sucesso — se a geração falhar
           // (ex.: erro de rede/servidor), a entrevista inteira (já confirmada) não pode ser
           // perdida; mantemos o estado pronto pra o usuário só dizer "sim" de novo.
-          const sidToUse = sessionId;
+          // sessionIdRef (não o state `sessionId`) — este callback é memoizado sem `sessionId`
+          // nas deps, então o state ficaria congelado em `null` (valor inicial) pra sempre,
+          // fazendo `endSession` nunca encerrar a sessão de verdade (ver bug 333100).
+          const sidToUse = sessionIdRef.current;
           const contextFromInterview = newHistory
             .filter(m => m.role === 'user' || m.role === 'assistant')
             .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}${m.at ? ` [${formatHoraComMs(m.at)}]` : ''}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
@@ -779,7 +782,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         // PATi already asked "Posso gerar?" — check if user is confirming
         const isConfirm = /(^|\s)(sim|pode|gerar?|vai|manda|ok|bora|claro|vamo|faz|gere|com certeza|logico|obvio|beleza|por favor|pfv|pf|agora|entao)\b/.test(normalizedForInterview);
         if (isConfirm) {
-          const sidToUse = sessionId;
+          // sessionIdRef (não o state `sessionId`) — mesmo motivo do outro ponto de uso: este
+          // callback (`sendMessage`) também não tem `sessionId` nas deps do useCallback.
+          const sidToUse = sessionIdRef.current;
           // A confirmação do analista ("sim"/"pode"/...) precisa entrar no histórico ANTES de
           // montar o InterviewContext — sem isso, a resposta que libera a geração fica visível
           // só no chat da tela, mas nunca é gravada na trilha de auditoria (PDF).
