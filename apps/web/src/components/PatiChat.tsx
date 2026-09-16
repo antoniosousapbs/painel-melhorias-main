@@ -897,7 +897,10 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       if (targetId) {
         const { resumedHistory } = await startSession(targetId, docReq.tipo);
         if (resumedHistory.length > 0) {
-          setMessages(prev => [...prev, { role: 'assistant', content: '🔄 Encontrei uma entrevista sua não concluída para este chamado — retomando de onde você parou, sem precisar repetir as respostas.' }]);
+          // Nem sempre a entrevista anterior ficou "não concluída" (pode já ter gerado um
+          // documento e o analista só quer ajustar algo agora) — mensagem neutra, sem afirmar
+          // que ficou pendente.
+          setMessages(prev => [...prev, { role: 'assistant', content: '🔄 Encontrei informações de entrevistas anteriores para este chamado — retomando de onde você parou, sem precisar repetir as respostas.' }]);
         }
         const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: resumedHistory, bulk: false, force: docReq.force };
         setInterview(interviewState);
