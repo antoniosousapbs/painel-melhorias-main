@@ -211,7 +211,14 @@ function parseInteracaoTurns(raw: string | null | undefined): { role: 'PATi' | '
       turnos.push({ role: 'Analista', texto: linha });
     }
   }
-  return turnos.filter(t => t.texto.length > 0);
+  // Trunca cada turno individualmente — sem isso, um único turno muito longo (ex.: a PATi
+  // ecoando de volta um resumo estruturado inteiro) gera um balão maior que uma página do PDF;
+  // como o retângulo do balão é desenhado com altura FIXA (calculada uma vez) mas o texto usa
+  // `.text()` do PDFKit (que pagina automaticamente quando não cabe), o texto continuava a
+  // fluir pra página seguinte SEM o balão/avatar, ficando visualmente solto e fora de formato.
+  return turnos
+    .filter(t => t.texto.length > 0)
+    .map(t => ({ ...t, texto: truncateForSheet(t.texto, 2000, 'histórico completo da entrevista no sistema') }));
 }
 
 /** Iniciais (até 2 letras) pra avatar do Analista no chat do PDF de Auditoria — 1ª letra do
@@ -515,6 +522,103 @@ export function calculateApf(elementos: ApfElement[], params: ApfParametros): Ap
   };
 
   return { elementos: calculatedElements, totalPF, totalPFA, totalHoras, horasDetalhamento };
+}
+
+/**
+ * Agregados nativos da aba "Contagem"/"Funções" (Total PF, breakdown por tipo/operação,
+ * contagens por tipo/complexidade) — usados por `generateApfExcel` pra SOBRESCREVER as células
+ * agregadas nativas do template, que ficam incompletas quando há mais de 10 elementos (a Table3
+ * nativa — `xl/tables/table1.xml`, `ref="B10:AH21"` — só cobre 10 linhas de dados; ver
+ * comentário "Template supports up to 10 rows" mais abaixo em generateApfExcel). Calculado
+ * sobre TODOS os elementos, não só os 10 primeiros que cabem na Table3. As fórmulas nativas
+ * "downstream" dessas células (ex.: `AU11=SUM(AU8:AU10)`, `AY8=AU8*3`, `Z12=T12*V12`,
+ * `AI7=SUM(AY11+AY18+...)`) continuam sendo fórmulas normais dentro da MESMA planilha (nunca
+ * referenciam Table3 diretamente) e recalculam corretamente a partir dos valores corrigidos —
+ * não precisamos tocar nelas nem na estrutura da Table3 (arriscado: ver "ExcelJS corrupts the
+ * Table3 structured table" mais abaixo).
+ */
+function computeContagemAggregates(elementos: ApfElement[], params: ApfParametros) {
+  const deflator = (op: string) => op === 'I' ? params.DeflatorInclusao : op === 'A' ? params.DeflatorAlteracao : params.DeflatorExclusao;
+
+  // Contagem!T12/T13/T14 ("Tipo de Contagem": Desenvolvimento/Melhoria/Aplicação) — PF bruto por operação.
+  const porOperacaoRaw: Record<string, number> = { I: 0, A: 0, E: 0 };
+  // Funções!S8:AG8 ("Incluída/Alterada/Excluída" por tipo, na aba Contagem) — PFA por tipo+operação.
+  const porTipoOperacaoPFA: Record<string, number> = {};
+  // Contagem!AU8..AU35 ("Resumo da Contagem": Detalhada/Estimativa/Indicativa) — contagem por tipo+complexidade.
+  const porTipoComplexidade: Record<string, number> = {};
+
+  for (const el of elementos) {
+    porOperacaoRaw[el.operacao] = (porOperacaoRaw[el.operacao] || 0) + el.pf;
+
+    const keyOp = `${el.tipo}_${el.operacao}`;
+    const pfa = +(el.pf * deflator(el.operacao)).toFixed(2);
+    porTipoOperacaoPFA[keyOp] = +((porTipoOperacaoPFA[keyOp] || 0) + pfa).toFixed(2);
+
+    const keyComplex = `${el.tipo}_${el.complexidade}`;
+    porTipoComplexidade[keyComplex] = (porTipoComplexidade[keyComplex] || 0) + 1;
+  }
+
+  return { porOperacaoRaw, porTipoOperacaoPFA, porTipoComplexidade };
+}
+
+/**
+ * Expande a Table3 nativa (aba "Funções") pra caber mais de 10 elementos, clonando a linha 19
+ * do template (a única das 10 linhas originais com fórmulas NORMAIS — não "shared" — e com
+ * todas as colunas presentes, inclusive AH/Observações, que falta na linha 20) uma vez por
+ * elemento extra, e deslocando pra baixo a linha de totais (21) e as linhas de preenchimento
+ * puramente visuais (22-44, sem fórmula/conteúdo) que existem no template abaixo da tabela.
+ * `renumberRow` funciona tanto pra clonar (linha 19 → nova linha N) quanto pra deslocar (linha
+ * 21 → 21+extra) porque só troca referências "COLUNA+número" que começam com letra maiúscula
+ * — não toca em constantes numéricas soltas (ex.: os limiares "<=19"/">=51" da fórmula de
+ * complexidade IFPUG) nem em referências absolutas de outra aba (ex.: "Contagem!$Z$19", que tem
+ * "$" entre a coluna e a linha, então o texto literal "Z19" nunca aparece ali).
+ */
+function expandFuncoesTableIfNeeded(sheet2: string, totalElementos: number): { sheet2: string; extraRows: number; lastDataRow: number } {
+  const extraRows = Math.max(0, totalElementos - 10);
+  if (extraRows === 0) return { sheet2, extraRows: 0, lastDataRow: 20 };
+
+  const templateRowMatch = sheet2.match(/<row r="19"[^>]*>[\s\S]*?<\/row>/);
+  if (!templateRowMatch) throw new Error('Linha-molde (19) não encontrada na aba Funções — o template pode ter mudado.');
+  const row20Match = sheet2.match(/<row r="20"[^>]*>[\s\S]*?<\/row>/);
+  if (!row20Match) throw new Error('Linha 20 não encontrada na aba Funções — o template pode ter mudado.');
+
+  const renumberRow = (rowXml: string, oldRow: number, newRow: number): string => {
+    let out = rowXml.replace(new RegExp(`^<row r="${oldRow}"`), `<row r="${newRow}"`);
+    out = out.replace(new RegExp(`([A-Z]{1,2})${oldRow}\\b`, 'g'), (_m, col: string) => `${col}${newRow}`);
+    return out;
+  };
+
+  // Linhas 21+ existentes no template (linha de totais + preenchimento visual abaixo dela) —
+  // extraídas ANTES de qualquer alteração, pra deslocar cada uma pra sua nova posição.
+  const rowsToShift: { oldRow: number; xml: string }[] = [];
+  let maxRow = 20;
+  for (const m of sheet2.matchAll(/<row r="(\d+)"[^>]*>[\s\S]*?<\/row>/g)) {
+    const rowNum = parseInt(m[1]);
+    if (rowNum >= 21) {
+      rowsToShift.push({ oldRow: rowNum, xml: m[0] });
+      if (rowNum > maxRow) maxRow = rowNum;
+    }
+  }
+
+  let novo = sheet2;
+  for (const { xml } of rowsToShift) novo = novo.replace(xml, '');
+
+  const linhasNovas: string[] = [];
+  for (let i = 1; i <= extraRows; i++) linhasNovas.push(renumberRow(templateRowMatch[0], 19, 20 + i));
+  for (const { oldRow, xml } of rowsToShift.sort((a, b) => a.oldRow - b.oldRow)) {
+    linhasNovas.push(renumberRow(xml, oldRow, oldRow + extraRows));
+  }
+
+  novo = novo.replace(row20Match[0], row20Match[0] + linhasNovas.join(''));
+
+  const lastDataRow = 20 + extraRows;
+  // Validação (tipo/dropdown I-A-E) e formatação condicional (cor por I/A/E) precisam cobrir
+  // as linhas novas, senão só as 10 primeiras linham ganham o dropdown/cor.
+  novo = novo.replace(/sqref="D13:D20"/, `sqref="D13:D${lastDataRow}"`);
+  novo = novo.replace(/sqref="E11:E20"/g, `sqref="E11:E${lastDataRow}"`);
+  novo = novo.replace(/<dimension ref="B1:AW\d+"\/>/, `<dimension ref="B1:AW${maxRow + extraRows}"/>`);
+
+  return { sheet2: novo, extraRows, lastDataRow };
 }
 
 // ─── Generate APF for a work item ───
@@ -1188,6 +1292,54 @@ function estimateWrappedLinesMultiline(text: string, charsPerLine: number): numb
   return text.split('\n').reduce((sum, segment) => sum + Math.max(1, Math.ceil(segment.length / charsPerLine)), 0);
 }
 
+// Larguras médias de caractere (em milésimos de "em", métricas padrão Helvetica/Arial — bem
+// próximas da Calibri usada no relatório) para os cartões do "Resumo Executivo" da Memória de
+// Cálculo. Substitui a heurística antiga (largura da coluna × fator fixo 0.75), que tratava
+// TODO caractere como se tivesse a MESMA largura — isso superestimava MUITO o nº de linhas
+// necessárias (um texto real tem muitas letras estreitas — i, l, espaço — que ocupam bem menos
+// que a média assumida), deixando uma sobra de várias linhas em branco no cartão (bug real
+// reportado: "espaço em branco" antes/depois do texto). Simular a quebra de linha palavra por
+// palavra, com a largura real de cada caractere, estima a altura necessária com muito mais
+// precisão, sem cair no erro oposto (cortar texto) que motivou o fator 0.75 no passado.
+const CHAR_WIDTH_1000: Record<string, number> = {
+  i: 222, l: 222, j: 222, I: 278, '.': 278, ',': 278, "'": 180, ':': 278, ';': 278, '!': 278, '|': 260, ' ': 278, '"': 355,
+  f: 333, t: 278, r: 333, '(': 333, ')': 333, '-': 333, '/': 278,
+  m: 833, w: 722, M: 889, W: 944,
+};
+function charWidth1000(ch: string): number {
+  if (ch in CHAR_WIDTH_1000) return CHAR_WIDTH_1000[ch];
+  if (/[0-9]/.test(ch)) return 556;
+  if (/[A-ZÀ-Þ]/.test(ch)) return 667;
+  return 500; // minúsculas/acentuadas e pontuação/símbolos não mapeados — largura média
+}
+
+/** Estima nº de linhas simulando a quebra de linha palavra por palavra (wrap real, não uma
+ * razão fixa caracteres/linha) — `availableWidthPt` já deve estar em pontos (não em "unidades
+ * de largura de coluna" do Excel; ver conversão no chamador). */
+function estimateWrappedLinesByWidth(text: string, availableWidthPt: number, fontSizePt: number): number {
+  if (!text) return 1;
+  const wordWidthPt = (word: string) => [...word].reduce((sum, ch) => sum + charWidth1000(ch), 0) / 1000 * fontSizePt;
+  const spaceWidthPt = charWidth1000(' ') / 1000 * fontSizePt;
+  let total = 0;
+  for (const paragrafo of text.split('\n')) {
+    if (!paragrafo) { total += 1; continue; }
+    let lineWidth = 0;
+    let linhas = 1;
+    for (const palavra of paragrafo.split(' ')) {
+      const w = wordWidthPt(palavra);
+      const add = lineWidth === 0 ? w : w + spaceWidthPt;
+      if (lineWidth > 0 && lineWidth + add > availableWidthPt) {
+        linhas++;
+        lineWidth = w;
+      } else {
+        lineWidth += add;
+      }
+    }
+    total += linhas;
+  }
+  return Math.max(1, total);
+}
+
 // Clona entradas de cellXfs (styles.xml) adicionando vertical="center", preservando fonte/
 // preenchimento/borda/horizontal originais — usado para centralizar verticalmente colunas do
 // template que originalmente não tinham esse atributo (ficam "coladas" embaixo quando a altura
@@ -1379,11 +1531,15 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
     box('FFC9CFD8', null), // 3 caixa fechada — topo 1ª linha de tabela (cabeçalho)
     box('FF7C8798', null), // 4 caixa fechada — topo linha TOTAL
     box(null, 'FFC9CFD8'), // 5 caixa fechada — nota de vigência
+    // Sem topo: usado só nos campos "mid" do Resumo Executivo — a borda inferior do card
+    // anterior já separa os dois, então um topo aqui só duplicava a linha (usuário pediu pra
+    // tirar essa borda extra que "não precisa existir").
+    `<border><left ${hair('FFD9DEE7')}left><right ${hair('FFD9DEE7')}right><top/><bottom ${hair('FFD9DEE7')}bottom><diagonal/></border>`, // 6 caixa sem topo
   ];
-  const [bSectionUnderline, bTopStrong, bTopHair, bTopFirstRow, bTopTotal, bDisclaimer] = newBorders.map((_, i) => bordersCount + i);
-  // Chip/card das linhas de campo usam a MESMA caixa fechada de topo forte/fino (bTopStrong/
-  // bTopHair) — antes tinham borda própria incompleta (só topo/direita); unificado.
-  const bFieldBoxFirst = bTopStrong, bFieldBoxRest = bTopHair;
+  const [bSectionUnderline, bTopStrong, bTopHair, bTopFirstRow, bTopTotal, bDisclaimer, bNoTop] = newBorders.map((_, i) => bordersCount + i);
+  // Só o 1º campo ("O que foi solicitado") mantém a caixa fechada com topo forte — os demais
+  // ("mid") não têm topo, pra não duplicar a borda inferior do card anterior.
+  const bFieldBoxFirst = bTopStrong, bFieldBoxRest = bNoTop;
   out = out.replace(bordersSection[0], `<borders count="${bordersCount + newBorders.length}">${bordersSection[2]}${newBorders.join('')}</borders>`);
 
   const cellXfsSection = out.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/)!;
@@ -1398,6 +1554,9 @@ function appendReportStyles(stylesXml: string): { stylesXml: string; ids: Report
     xf(fSection, 0, bSectionUnderline, 'left', 'center', false), // 4 section
     xf(fChip, fillTableHdr, bFieldBoxFirst, 'center', 'center'), // 5 fieldLabelFirst
     xf(fChip, fillTableHdr, bFieldBoxRest, 'center', 'center'), // 6 fieldLabelRest
+    // 'center' (não 'top'): agora que a altura é estimada com largura real de caractere
+    // (estimateWrappedLinesByWidth), a sobra é pequena (~1 linha) — centralizado fica melhor
+    // visualmente e consistente com o resto da Memória de Cálculo (chip/label também é center).
     xf(fBody, 0, bFieldBoxFirst, 'justify', 'center'), // 7 fieldCardFirst
     xf(fBody, 0, bFieldBoxRest, 'justify', 'center'), // 8 fieldCardRest
     xf(fBodyBold, fillTableHdr, bTopStrong, 'center', 'center', false), // 9 tableHeaderFirst
@@ -1527,27 +1686,37 @@ function buildStyledSheetXml(rows: SheetRow[], colWidths: number[], ids: ReportS
     // renderiza — célula dentro do intervalo mesclado usa a largura do intervalo todo, célula
     // fora dele usa só a largura da própria coluna (ex.: "Processo Elementar", coluna C sozinha,
     // bem mais estreita que o card de "Justificativa de Negócio" mesclado D:K — estimar as duas
-    // pela largura do card subestimava a altura necessária pra coluna estreita). Fator reduzido
-    // (0.75, não 1:1): largura de coluna do Excel não equivale a nº de caracteres pra qualquer
-    // fonte/peso (negrito ocupa mais) — superestimar caracteres por linha cortava o texto
-    // (alinhado ao topo, cortava o fim; antes, centralizado, cortava os dois lados).
+    // pela largura do card subestimava a altura necessária pra coluna estreita).
     const mergedWidth = row.mergeFrom !== undefined
       ? colWidths.slice(row.mergeFrom).reduce((a, b) => a + b, 0)
       : null;
+    // 1 unidade de largura de coluna do Excel ≈ 7px (MDW do Calibri 11, fonte padrão do
+    // workbook) ≈ 5.25pt (a 96dpi) — usado só pelo estimador por largura real de caractere
+    // (band 'field'); as demais bandas continuam com o fator fixo antigo (0.75), mais
+    // conservador mas já validado nelas, pra não arriscar regressão fora do que foi reportado.
+    const EXCEL_WIDTH_UNIT_TO_PT = 5.25;
     const lines = row.cells.reduce((maxLines: number, val, ci) => {
       if (typeof val !== 'string' || !val) return maxLines;
       const cellWidth = (mergedWidth !== null && row.mergeFrom !== undefined && ci >= row.mergeFrom)
         ? mergedWidth
         : (colWidths[ci] ?? 55);
+      if (row.band === 'field') {
+        return Math.max(maxLines, estimateWrappedLinesByWidth(val, cellWidth * EXCEL_WIDTH_UNIT_TO_PT, 9));
+      }
       const charsPerLine = Math.max(1, Math.round(cellWidth * 0.75));
       return Math.max(maxLines, estimateWrappedLinesMultiline(val, charsPerLine));
     }, 1);
+    // +1 linha de folga só na band 'field': a estimativa por largura de caractere é precisa,
+    // mas "exata" (sem sobra) deixa o texto colado nas bordas de cima/baixo do card, dando
+    // impressão de corte — 1 linha extra garante respiro visual em TODOS os campos do Resumo
+    // Executivo, igual ao que já acontecia (por acaso, efeito de arredondamento) só no 1º campo.
+    const linesWithSlack = row.band === 'field' && lines > 1 ? lines + 1 : lines;
     // Teto real do Excel pra altura de uma única linha é ~409pt (limite da UI) — usar um teto
     // bem menor (250) cortava visualmente textos longos (ex.: solicitação compilada de várias
     // entrevistas) no meio da frase, sem nenhum aviso pro usuário de que faltava conteúdo.
     const heightAttr = row.height
       ? ` ht="${row.height}" customHeight="1"`
-      : lines > 1 ? ` ht="${Math.min(lines * 14, 409)}" customHeight="1"` : '';
+      : linesWithSlack > 1 ? ` ht="${Math.min(linesWithSlack * 14, 409)}" customHeight="1"` : '';
 
 
     return `<row r="${r}"${heightAttr}>${cells}</row>`;
@@ -1861,6 +2030,24 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
     { bold: false, text: descricaoCustomizacao },
   ], leftAlign[139]);
 
+  // Corrige "Tipo de Contagem" (Desenvolvimento/Melhoria/Aplicação) e "Resumo da Contagem"
+  // (Detalhada/Estimativa/Indicativa) pra refletirem TODOS os elementos, não só os 10 primeiros
+  // que cabem na Table3 nativa — ver computeContagemAggregates.
+  const { porOperacaoRaw, porTipoOperacaoPFA, porTipoComplexidade } = computeContagemAggregates(apf.elementos, params);
+  sheet1 = setCellValue(sheet1, 'T12', porOperacaoRaw.I);
+  sheet1 = setCellValue(sheet1, 'T13', porOperacaoRaw.A);
+  sheet1 = setCellValue(sheet1, 'T14', porOperacaoRaw.E);
+  const complexCellMap: Record<string, string> = {
+    EE_Baixa: 'AU8', EE_Media: 'AU9', EE_Alta: 'AU10',
+    SE_Baixa: 'AU14', SE_Media: 'AU15', SE_Alta: 'AU16',
+    CE_Baixa: 'AU21', CE_Media: 'AU22', CE_Alta: 'AU23',
+    ALI_Baixa: 'AU27', ALI_Media: 'AU28', ALI_Alta: 'AU29',
+    AIE_Baixa: 'AU33', AIE_Media: 'AU34', AIE_Alta: 'AU35',
+  };
+  for (const [key, cell] of Object.entries(complexCellMap)) {
+    sheet1 = setCellValue(sheet1, cell, porTipoComplexidade[key] || 0);
+  }
+
   // Remove cached formula values in Contagem to force recalculation
   const formulaCachePattern = /(<c r="[^"]*"[^>]*>(?:<f[^>]*>.*?<\/f>|<f[^/]*\/>))<v>[^<]*<\/v>/g;
   sheet1 = sheet1.replace(formulaCachePattern, '$1');
@@ -1870,16 +2057,31 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // ─── Aba Funções (sheet2.xml) ───
   let sheet2 = await zip.file('xl/worksheets/sheet2.xml')!.async('string');
 
+  // A linha 20 do template original não tem célula AH20 (Observações) — só as linhas 11-19 têm.
+  // setCellValue() edita células EXISTENTES, nunca insere uma ausente, então a justificativa do
+  // elemento que cair exatamente na linha 20 nunca era escrita (bug real: 10º/20º/... elemento
+  // sempre aparecia sem comentário). Insere a célula ausente (mesmo estilo de AH19) antes de
+  // qualquer outra edição na aba.
+  if (!/<c r="AH20"/.test(sheet2)) {
+    sheet2 = sheet2.replace(/(<c r="AG20"[^>]*>[\s\S]*?<\/c>)(<\/row>)/, '$1<c r="AH20" s="103"/>$2');
+  }
+
+  // Table3 nativa só tem 10 linhas de dados no template original — expande dinamicamente
+  // quando há mais elementos, em vez de descartar os excedentes (ver expandFuncoesTableIfNeeded).
+  const { sheet2: sheet2Expandido, extraRows, lastDataRow } = expandFuncoesTableIfNeeded(sheet2, apf.elementos.length);
+  sheet2 = sheet2Expandido;
+
   // Replace "Empresa: DOCOL" in B5 with actual client name
   sheet2 = setCellValue(sheet2, 'B5', `Empresa: ${wi.ClienteNome || 'N/A'}`, newStrings, existingCount);
   // B7 ("Projeto") era texto fixo no template ("Projeto: HPF Data de Programação"), nunca
   // substituído — sempre aparecia igual em toda planilha gerada. Agora reflete o chamado real.
   sheet2 = setCellValue(sheet2, 'B7', `Projeto: #${wi.Id} - ${wi.Title}`, newStrings, existingCount);
 
-  // Fill elements into rows 11-20 (text via shared strings, numbers direct)
+  // Fill elements into rows 11..lastDataRow (text via shared strings, numbers direct) — sem
+  // teto fixo: expandFuncoesTableIfNeeded já garantiu que existem linhas suficientes acima.
   apf.elementos.forEach((el, idx) => {
     const row = 11 + idx;
-    if (row > 20) return; // Template supports up to 10 rows
+    if (row > lastDataRow) return;
     sheet2 = setCellValue(sheet2, `B${row}`, el.processo, newStrings, existingCount);
     sheet2 = setCellValue(sheet2, `D${row}`, el.tipo, newStrings, existingCount);
     sheet2 = setCellValue(sheet2, `E${row}`, el.operacao, newStrings, existingCount);
@@ -1901,14 +2103,14 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   // Fix column D (Tipo) alignment: original styles 117/124 have numFmtId=4 (number format)
   // which causes Excel to ignore horizontal alignment for text values. Style 2 (used by col E)
   // has numFmtId=0 + center alignment and works correctly — usamos o clone com vertical=center.
-  for (let r = 11; r <= 20; r++) {
+  for (let r = 11; r <= lastDataRow; r++) {
     sheet2 = sheet2.replace(new RegExp(`<c r="D${r}" s="\\d+"`), `<c r="D${r}" s="${vCenter[2]}"`);
   }
 
   // Normalize column B styles: original uses mix of 125/124/122/121/104 causing
   // inconsistent appearance. Use style 104 (left, fontId=13 non-bold, wrapText) for all
   // (104 já tem vertical="center" no template original).
-  for (let r = 11; r <= 20; r++) {
+  for (let r = 11; r <= lastDataRow; r++) {
     sheet2 = sheet2.replace(new RegExp(`<c r="B${r}" s="\\d+"`), `<c r="B${r}" s="104"`);
   }
 
@@ -1922,9 +2124,24 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
     M: vCenter[84], N: forceCenter[85], O: forceCenter[85], P: forceCenter[85], Q: forceCenter[85],
   };
   for (const [col, styleId] of Object.entries(colunasParaCentralizar)) {
-    for (let r = 11; r <= 20; r++) {
+    for (let r = 11; r <= lastDataRow; r++) {
       sheet2 = sheet2.replace(new RegExp(`<c r="${col}${r}" s="\\d+"`), `<c r="${col}${r}" s="${styleId}"`);
     }
+  }
+
+  // Corrige "Total de Pontos de Função"/"Total de Pontos de Função Ajustado" (F6/F7 — fonte de
+  // Contagem!Z17/Z18/Z20) e o breakdown "Incluída/Alterada/Excluída" por tipo (S8:AG8) pra
+  // refletirem TODOS os elementos, não só os 10 primeiros que cabem na Table3 nativa — ver
+  // computeContagemAggregates.
+  sheet2 = setCellValue(sheet2, 'F6', apf.totalPF);
+  sheet2 = setCellValue(sheet2, 'F7', apf.totalPFA);
+  const tipoOpCellMap: Record<string, string> = {
+    SE_E: 'S8', CE_E: 'T8', EE_E: 'U8', AIE_E: 'V8', ALI_E: 'W8',
+    SE_A: 'X8', CE_A: 'Y8', EE_A: 'Z8', AIE_A: 'AA8', ALI_A: 'AB8',
+    SE_I: 'AC8', CE_I: 'AD8', EE_I: 'AE8', AIE_I: 'AF8', ALI_I: 'AG8',
+  };
+  for (const [key, cell] of Object.entries(tipoOpCellMap)) {
+    sheet2 = setCellValue(sheet2, cell, porTipoOperacaoPFA[key] || 0);
   }
 
   // Remove cached formula values in data rows to force recalculation
@@ -2018,9 +2235,44 @@ export async function generateApfExcel(wi: any, apf: ApfResult, params: ApfParam
   }
   zip.file('xl/workbook.xml', workbook);
 
+  // ─── Fix Table3: borda esquerda preta/grossa (tableBorderDxfId) não bate com o resto ───
+  // O template original define, no dxf usado como "tableBorderDxfId" da Table3 (dxf índice 49
+  // em xl/styles.xml), uma borda ESQUERDA "medium" preta (indexed=8) + borda INFERIOR "hair"
+  // preta — diferente de TODOS os outros elementos de estilo da tabela (headerRow/firstColumn/
+  // lastColumn/wholeTable), que usam borda "thin" na cor rosa/vermelho claro (FFFF5B5B), e da
+  // linha de cabeçalho da tabela principal, que usa "thin" laranja (FFC00000). Isso cria uma
+  // borda preta grossa visível na lateral esquerda da Table3 (coluna B) destoando do resto do
+  // relatório. Confirmado que dxf 49 só é referenciado por tableBorderDxfId="49" (nenhuma
+  // conditionalFormatting ou outro estilo usa esse índice) — seguro trocar pra "thin" laranja,
+  // igual ao cabeçalho da tabela (dxf 51, headerRowDxfId), sem afetar mais nada no template.
+  let stylesFinalPre = await zip.file('xl/styles.xml')!.async('string');
+  stylesFinalPre = stylesFinalPre.replace(
+    '<dxf><border outline="0"><left style="medium"><color indexed="8"/></left><bottom style="hair"><color indexed="8"/></bottom></border></dxf>',
+    '<dxf><border outline="0"><left style="thin"><color rgb="FFC00000"/></left><bottom style="thin"><color rgb="FFC00000"/></bottom></border></dxf>',
+  );
+  // ─── Fix: bordas rosa/vermelho-claro (caixas de identificação/resumo em Contagem e Funções)
+  // não batem com o laranja usado no resto do relatório ───
+  // O template usa DUAS cores de borda "vermelha" diferentes: FFC00000 (laranja escuro, usado
+  // no cabeçalho da tabela principal de elementos) e FFFF5B5B/FFFF4F4F (rosa/vermelho claro,
+  // usado nas caixas de "Total de Pontos de Função/Custos", "Tipo de Contagem" etc.). Usuário
+  // confirmou (2 rodadas de screenshot) que quer TODAS as bordas iguais — não só a borda da
+  // Table3 (já corrigida acima). Confirmado que essas duas cores só aparecem em contexto de
+  // BORDA (<left>/<right>/<top>/<bottom>/<vertical>/<horizontal>), nunca em fonte ou
+  // preenchimento — troca textual segura em todo o styles.xml, sem risco de mudar cor de
+  // texto/fundo em nenhum lugar.
+  stylesFinalPre = stylesFinalPre.replace(/FFFF5B5B/g, 'FFC00000').replace(/FFFF4F4F/g, 'FFC00000');
+  zip.file('xl/styles.xml', stylesFinalPre);
+
   // ─── Fix Table3: disable row stripes (causes inconsistent bold) ───
   let table1 = await zip.file('xl/tables/table1.xml')!.async('string');
   table1 = table1.replace('showRowStripes="1"', 'showRowStripes="0"');
+  // Expande o range da Table3 pra cobrir as linhas extras inseridas em sheet2 (ver
+  // expandFuncoesTableIfNeeded) — a linha de totais nativa (SUBTOTAL sobre Table3[coluna])
+  // se ajusta sozinha, pois SUBTOTAL sobre uma referência estruturada acompanha o tamanho
+  // atual da tabela automaticamente, sem precisar editar as fórmulas de totais.
+  if (extraRows > 0) {
+    table1 = table1.replace(/ref="B10:AH21"/, `ref="B10:AH${21 + extraRows}"`);
+  }
   zip.file('xl/tables/table1.xml', table1);
 
   // ─── Update sharedStrings.xml with new strings ───
@@ -2220,7 +2472,13 @@ export async function generateApfAuditoriaPdf(workItemId: number): Promise<Buffe
         const naturalWidth = doc.widthOfString(t.texto);
         doc.font('Helvetica-Bold').fontSize(NAME_SIZE);
         const nameWidth = doc.widthOfString(nome);
-        const contentWidth = Math.min(maxContentWidth, Math.max(naturalWidth, nameWidth, 46));
+        // Horário agora inclui a DATA (ex.: "14/09/2026 20:31:27.074"), bem mais largo que só a
+        // hora — precisa entrar no cálculo da largura do balão, senão um balão estreito (mensagem
+        // curta tipo "sim") força o horário a quebrar em 2 linhas, o que `timeLineHeight` (altura
+        // fixa de 1 linha) não previa, cortando visualmente o horário na borda do balão.
+        doc.fontSize(TIME_SIZE).font('Helvetica');
+        const timeWidth = t.horario ? doc.widthOfString(t.horario) : 0;
+        const contentWidth = Math.min(maxContentWidth, Math.max(naturalWidth, nameWidth, timeWidth, 46));
         const bubbleWidth = contentWidth + BUBBLE_PAD_X * 2;
 
         doc.font('Helvetica').fontSize(BODY_SIZE);

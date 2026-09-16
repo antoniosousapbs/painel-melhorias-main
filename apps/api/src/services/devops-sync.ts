@@ -73,7 +73,6 @@ function stripHtml(html: string): string {
 export type SyncProgressEvent =
   | { type: 'start'; total: number }
   | { type: 'progress'; current: number; total: number; pct: number; id: number; title: string }
-  | { type: 'pati'; current: number; total: number }
   | { type: 'done'; total: number; created: number; updated: number; canceled: number }
   | { type: 'cancelled' }
   | { type: 'error'; message: string };
@@ -347,32 +346,32 @@ async function runSync(
     }
   }
 
-  // Fetch [PATI] comments from Discussion for all items
-  console.log('💬 Fetching [PATI] comments from DevOps...');
-  let patiUpdated = 0;
-  for (let i = 0; i < allIds.length; i += 50) {
-    if (cancelRequested) {
-      onProgress?.({ type: 'cancelled' });
-      return { total: allIds.length, updated, created, canceled: canceledIds.length, cancelled: true };
-    }
-    onProgress?.({ type: 'pati', current: i, total: allIds.length });
-    const batch = allIds.slice(i, i + 50);
-    for (const id of batch) {
-      try {
-        const patiComment = await fetchPatiComment(id);
-        if (patiComment) {
-          await pool.request()
-            .input('id', sql.Int, id)
-            .input('discussion', sql.NVarChar(sql.MAX), patiComment)
-            .query(`UPDATE WorkItems SET DiscussionPati = @discussion WHERE Id = @id AND (DiscussionPati IS NULL OR DiscussionPati != @discussion)`);
-          patiUpdated++;
-        }
-      } catch { /* skip individual comment errors */ }
-    }
-  }
-  if (patiUpdated > 0) console.log(`💬 Updated [PATI] comments for ${patiUpdated} items`);
-
+  // Os comentários [PATI] NÃO são mais varridos aqui (era 1 chamada HTTP por item, em TODA
+  // sincronização — manual ou cron a cada 2h — o que não escala com o crescimento do backlog).
+  // Agora são buscados sob demanda, só pro chamado específico, no momento em que uma entrevista
+  // com a PATi começa (ver refreshPatiComment, chamado a partir de registerInterviewSession).
   return { total: allIds.length, updated, created, canceled: canceledIds.length };
+}
+
+/**
+ * Busca ao vivo (1 chamada HTTP) o comentário [PATI] mais atual de UM chamado específico e
+ * persiste em WorkItems.DiscussionPati — chamado no início de uma entrevista (nova ou
+ * retomada), não durante a sincronização geral. Falha "aberta": se o DevOps estiver
+ * indisponível ou o PAT tiver expirado, mantém o último valor já salvo em vez de bloquear a
+ * entrevista (mesmo padrão de tolerância a falhas já usado no sync completo).
+ */
+export async function refreshPatiComment(workItemId: number): Promise<void> {
+  try {
+    const patiComment = await fetchPatiComment(workItemId);
+    if (patiComment === null) return; // sem [PATI] no DevOps — não apaga o que já existe localmente
+    const pool = await getPool();
+    await pool.request()
+      .input('id', sql.Int, workItemId)
+      .input('discussion', sql.NVarChar(sql.MAX), patiComment)
+      .query(`UPDATE WorkItems SET DiscussionPati = @discussion WHERE Id = @id AND (DiscussionPati IS NULL OR DiscussionPati != @discussion)`);
+  } catch (err) {
+    console.error(`⚠️ refreshPatiComment(${workItemId}) falhou — usando último valor salvo:`, (err as Error).message);
+  }
 }
 
 /** Fetch comments from a work item's discussion and extract [PATI] tagged content */

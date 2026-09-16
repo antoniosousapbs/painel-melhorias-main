@@ -208,6 +208,64 @@ async function main() {
   if (wbRels.includes('worksheets/sheet4.xml')) fail('workbook.xml.rels ainda registra sheet4.xml (TFS) — deveria ter sido removido.');
   console.log('✅ Aba "TFS" (vazia, órfã) removida do pacote e de todo o wiring.');
 
+  // ── 8. Agregados nativos de Contagem/Funções corretos mesmo com MAIS de 10 elementos ──
+  // Table3 (xl/tables/table1.xml) tem um teto fixo de 10 linhas de dados — elementos além do
+  // 10º nunca aparecem lá, mas os totais (Total PF/PFA, Tipo de Contagem, breakdown por tipo)
+  // precisam refletir TODOS os elementos (ver computeContagemAggregates em document-generator.ts).
+  // Bug real (chamado #318120, 2026-09-14): com 14 elementos, "Contagem" mostrava 216h
+  // (baseado em só 10 elementos) enquanto o total real era 304h.
+  const MANY_ELEMENTOS: ApfResult['elementos'] = [
+    { processo: 'E1', tipo: 'ALI', operacao: 'A', td: 6, arTr: 1, complexidade: 'Baixa', pf: 7 },
+    { processo: 'E2', tipo: 'EE', operacao: 'A', td: 2, arTr: 1, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E3', tipo: 'EE', operacao: 'A', td: 3, arTr: 1, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E4', tipo: 'ALI', operacao: 'A', td: 1, arTr: 1, complexidade: 'Baixa', pf: 7 },
+    { processo: 'E5', tipo: 'EE', operacao: 'A', td: 2, arTr: 1, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E6', tipo: 'CE', operacao: 'A', td: 3, arTr: 2, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E7', tipo: 'EE', operacao: 'I', td: 3, arTr: 2, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E8', tipo: 'CE', operacao: 'I', td: 5, arTr: 2, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E9', tipo: 'CE', operacao: 'I', td: 10, arTr: 3, complexidade: 'Media', pf: 4 },
+    { processo: 'E10', tipo: 'EE', operacao: 'I', td: 10, arTr: 2, complexidade: 'Media', pf: 4 },
+    { processo: 'E11', tipo: 'SE', operacao: 'A', td: 6, arTr: 2, complexidade: 'Media', pf: 5 },
+    { processo: 'E12', tipo: 'ALI', operacao: 'A', td: 1, arTr: 1, complexidade: 'Baixa', pf: 7 },
+    { processo: 'E13', tipo: 'CE', operacao: 'A', td: 4, arTr: 1, complexidade: 'Baixa', pf: 3 },
+    { processo: 'E14', tipo: 'ALI', operacao: 'A', td: 6, arTr: 1, complexidade: 'Baixa', pf: 7 },
+  ];
+  const MANY_APF: ApfResult = {
+    elementos: MANY_ELEMENTOS,
+    totalPF: 62,
+    totalPFA: 38,
+    totalHoras: 304,
+    horasDetalhamento: { gestao: 0, analiseNegocio: 0, analiseTestes: 0, codificacao: 0, execucaoTestes: 0, homologacao: 0 },
+  };
+  const manyBuf = await generateApfExcel(FAKE_WI, MANY_APF, FAKE_PARAMS as any, FAKE_SINTESE);
+  const manyZip = await JSZip.loadAsync(manyBuf);
+  const manySheet1 = await manyZip.file('xl/worksheets/sheet1.xml')!.async('string');
+  const manySheet2 = await manyZip.file('xl/worksheets/sheet2.xml')!.async('string');
+
+  function cellValue(xml: string, ref: string): number {
+    const m = xml.match(new RegExp(`<c r="${ref}"[^>]*><v>([^<]*)</v></c>`));
+    return m ? parseFloat(m[1]) : NaN;
+  }
+  if (cellValue(manySheet2, 'F6') !== 62) fail(`Funções!F6 (Total PF) = ${cellValue(manySheet2, 'F6')}, esperado 62 (soma de TODOS os 14 elementos, não só os 10 que cabem na Table3).`);
+  if (cellValue(manySheet2, 'F7') !== 38) fail(`Funções!F7 (Total PF Ajustado) = ${cellValue(manySheet2, 'F7')}, esperado 38.`);
+  if (cellValue(manySheet1, 'T12') !== 14) fail(`Contagem!T12 (Desenvolvimento/Inclusão, PF bruto) = ${cellValue(manySheet1, 'T12')}, esperado 14.`);
+  if (cellValue(manySheet1, 'T13') !== 48) fail(`Contagem!T13 (Melhoria/Alteração, PF bruto) = ${cellValue(manySheet1, 'T13')}, esperado 48.`);
+  console.log('✅ Agregados de Contagem/Funções (Total PF/PFA, Tipo de Contagem) corretos com 14 elementos (acima do limite de 10 da Table3 nativa).');
+
+  // ── 9. Table3 nativa expandida — as 14 linhas aparecem INDIVIDUALMENTE (não só nos
+  // agregados), a linha de totais foi deslocada e a validação/formatação condicional passou
+  // a cobrir o intervalo novo ──
+  if (!manySheet2.match(/ref="B10:AH25"/) && !(await manyZip.file('xl/tables/table1.xml')!.async('string')).includes('ref="B10:AH25"')) {
+    fail('Table3 (xl/tables/table1.xml) não foi expandida para "B10:AH25" (10 linhas originais + 4 extras) — elementos além do 10º continuariam invisíveis individualmente.');
+  }
+  for (let i = 0; i < MANY_ELEMENTOS.length; i++) {
+    const row = 11 + i;
+    if (!manySheet2.includes(`r="D${row}"`)) fail(`Linha ${row} (elemento #${i + 1}) não existe na aba Funções — elementos além do 10º devem ganhar linhas novas, não desaparecer.`);
+  }
+  if (!manySheet2.match(/<row r="25"[^>]*>[\s\S]*?SUBTOTAL\(109,Table3\[PF\]\)/)) fail('Linha de totais (SUBTOTAL) não foi deslocada corretamente pra linha 25 após inserir as 4 linhas extras.');
+  if (!manySheet2.includes('sqref="D13:D24"') || !manySheet2.includes('sqref="E11:E24"')) fail('Validação de dados (dropdown Tipo/I-A-E) não foi expandida pra cobrir as linhas novas (21-24).');
+  console.log('✅ Table3 expandida corretamente — todas as 14 linhas aparecem individualmente na aba Funções, totais e validações deslocados.');
+
   console.log('\n🎉 Todas as verificações passaram — template Excel sem regressão.');
   process.exit(0);
 }

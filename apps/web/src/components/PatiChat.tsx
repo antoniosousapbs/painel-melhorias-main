@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import PatiSprite from './PatiSprite';
 import { getAccessToken } from '../auth/authFetch';
-import { registerInterviewSession, releaseInterviewSession, heartbeatInterviewSession, fetchLlmCurrentProviderLabel, API_BASE } from '../services/api';
+import { registerInterviewSession, releaseInterviewSession, heartbeatInterviewSession, saveInterviewTranscript, fetchResumableInterview, fetchLlmCurrentProviderLabel, API_BASE } from '../services/api';
 import { useMsal } from '@azure/msal-react';
 
 export interface PatiFilters {
@@ -17,11 +17,29 @@ interface Message {
   content: string;
 }
 
-/** Horário com milissegundos (ex: "15:15:56.123") — diferencia turnos que aconteceram no mesmo
- * segundo (respostas rápidas), o que `toLocaleTimeString` sozinho não distingue. */
+/** Data + horário com milissegundos (ex: "14/09/2026 15:15:56.123") — usado só para compilar o
+ * `interviewContext` (nunca pra exibição na tela). Diferencia turnos que aconteceram no mesmo
+ * segundo (respostas rápidas, o que `toLocaleTimeString` sozinho não distingue) E identifica em
+ * qual DIA cada turno ocorreu — sem a data, o PDF de Auditoria (que só recebe esse texto
+ * compilado, sem acesso ao objeto Date original) não tinha como mostrar quando, só a que horas,
+ * uma entrevista que se estendeu por mais de um dia realmente aconteceu. */
 function formatHoraComMs(iso: string): string {
   const d = new Date(iso);
-  return `${d.toLocaleTimeString('pt-BR')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  return `${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
+type InterviewState = { active: boolean; workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean };
+
+// Entrevista em andamento só vivia em estado do React — um refresh acidental da página (ou
+// a aba fechando) perdia TODAS as respostas já dadas, mesmo sem nenhuma falha de geração
+// envolvida. Persistir em sessionStorage (sobrevive a refresh, some ao fechar a aba — nunca
+// vaza pra outra sessão/usuário) dá uma rede de segurança adicional.
+const INTERVIEW_STORAGE_KEY = 'pati_interview_state';
+function loadStoredInterview(): InterviewState | null {
+  try {
+    const raw = sessionStorage.getItem(INTERVIEW_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
 }
 
 const SUGGESTIONS = [
@@ -144,26 +162,48 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(() => localStorage.getItem('pati_chat_expanded') === '1');
   const [chatProviderLabel, setChatProviderLabel] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Olá! Sou a **PATi**, sua agente de suporte. Pergunte sobre os dados do painel ou peça para classificar chamados! 🐝' },
-  ]);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const base: Message[] = [
+      { role: 'assistant', content: 'Olá! Sou a **PATi**, sua agente de suporte. Pergunte sobre os dados do painel ou peça para classificar chamados! 🐝' },
+    ];
+    const restored = loadStoredInterview();
+    if (restored?.history?.length) {
+      base.push({ role: 'assistant', content: '🔄 Retomando a entrevista de onde paramos — suas respostas anteriores foram preservadas.' });
+      for (const turno of restored.history) {
+        base.push({ role: turno.role === 'user' ? 'user' : 'assistant', content: turno.content });
+      }
+    }
+    return base;
+  });
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState<{ pct: number; current: number; total: number } | null>(null);
-  const [interview, setInterview] = useState<{ active: boolean; workItemId: number; tipo: string; history: { role: string; content: string; at?: string }[]; readyToGenerate?: boolean; bulk?: boolean; force?: boolean; isRefinement?: boolean } | null>(null);
+  const [interview, setInterview] = useState<InterviewState | null>(() => loadStoredInterview());
   const [pendingDocTipo, setPendingDocTipo] = useState<'APF' | 'SPEC' | 'AMBOS' | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Lido dentro de callbacks (ex.: runInterviewStep) sem precisar entrar na dependency array —
+  // evita recriar a função a cada troca de sessionId e evita closure desatualizada.
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
   useEffect(() => { scrollToBottom(); }, [messages, status, scrollToBottom]);
+  // Mantém a entrevista salva em sessionStorage sempre atualizada — some junto quando a
+  // entrevista é encerrada/concluída (interview === null) ou some sozinho ao fechar a aba.
+  useEffect(() => {
+    try {
+      if (interview) sessionStorage.setItem(INTERVIEW_STORAGE_KEY, JSON.stringify(interview));
+      else sessionStorage.removeItem(INTERVIEW_STORAGE_KEY);
+    } catch { /* sessionStorage indisponível/cheio — não é crítico, só perde a rede de segurança */ }
+  }, [interview]);
   useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
   useEffect(() => { localStorage.setItem('pati_chat_expanded', expanded ? '1' : '0'); }, [expanded]);
 
@@ -284,7 +324,20 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
   }, [filters, onClassifyDone]);
 
   /* ─── Session helpers ─── */
-  const startSession = useCallback(async (workItemId: number, tipo: string): Promise<string> => {
+  // Antes de começar uma entrevista do zero, verifica se o PRÓPRIO usuário já tem uma
+  // entrevista não concluída pra esse chamado+tipo salva no servidor (ver TranscriptJson) —
+  // se houver, retoma o mesmo sessionId + histórico em vez de perguntar tudo de novo (só
+  // some se a entrevista terminar com sucesso ou for encerrada explicitamente pelo usuário).
+  const startSession = useCallback(async (workItemId: number, tipo: string): Promise<{ sid: string; resumedHistory: { role: string; content: string; at?: string }[] }> => {
+    try {
+      const resumable = await fetchResumableInterview(workItemId, tipo);
+      if (resumable.resumable && resumable.sessionId && resumable.history?.length) {
+        setSessionId(resumable.sessionId);
+        setConflictWarning(null);
+        return { sid: resumable.sessionId, resumedHistory: resumable.history };
+      }
+    } catch { /* segue pro fluxo normal se a checagem falhar */ }
+
     const sid = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
       const result = await registerInterviewSession(sid, workItemId, tipo, userName, userEmail);
@@ -296,7 +349,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         setConflictWarning(null);
       }
     } catch { /* non-blocking */ }
-    return sid;
+    return { sid, resumedHistory: [] };
   }, [userName, userEmail]);
 
   const endSession = useCallback(async (sid: string | null) => {
@@ -365,6 +418,12 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       let buffer = '';
       let generated = 0;
       let totalSteps = 0;
+      // Nem toda falha vira exceção — o stream SSE pode completar normalmente (res.ok, sem
+      // throw) mesmo quando a geração de UM item falhou (ex.: LLM devolveu resposta vazia).
+      // Sem rastrear isso, a função sempre retornava sucesso ao chegar no fim do stream, o
+      // chamador limpava a entrevista, e a resposta da PATi vinha vazia/com erro — perdendo a
+      // entrevista inteira mesmo sem nenhuma exceção de rede ter acontecido.
+      let hadError = false;
 
       const updateLastMsg = (content: string) => {
         setMessages(prev => {
@@ -409,9 +468,11 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
               setStatus(`✨ #${data.id} ${data.step}${detail}`);
               updateLastMsg(`🔄 Gerando... **${data.current}/${data.total}** (${data.pct}%)\n\nÚltimo: #${data.id} ${data.step}${detail}`);
             } else if (data.type === 'error') {
+              hadError = true;
               setStatus(`❌ #${data.id} ${data.step}: ${data.message}`);
             } else if (data.type === 'done') {
               setProgress(null);
+              if (data.errors > 0) hadError = true;
 
               // When nothing was generated, show a helpful message
               if (data.generated === 0 && data.total === 0) {
@@ -440,8 +501,19 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
                     if (r.spec) detail += ' | Spec ✓';
                     if (r.error) detail += ` | ❌ ${r.error}`;
                     lines.push(detail);
+                    // A listagem individual de elementos nas abas nativas "Contagem"/"Funções"
+                    // é limitada a 10 linhas (estrutura de tabela Excel fixa do template) — acima
+                    // disso, elementos extras não aparecem listados linha a linha ali (só na
+                    // "Memória de Cálculo"). Os TOTAIS dessas abas (PF/PFA/horas, breakdown por
+                    // tipo) já são corrigidos pelo backend pra refletir TODOS os elementos.
+                    if (r.apf && r.apf.elementos > 10) {
+                      lines.push(`  ℹ️ ${r.apf.elementos} elementos — os totais desta APF (${r.apf.totalPF} PF / ${r.apf.totalHoras}h) já refletem todos eles, mas a listagem linha a linha nas abas "Contagem"/"Funções" do Excel mostra só os 10 primeiros (a lista completa está na aba "Memória de Cálculo").`);
+                    }
                   }
                 }
+                // Erro real (não exceção de rede) — a entrevista NÃO é limpa pelo chamador
+                // nesse caso (ver `hadError`/return), então avisa que dá pra só tentar de novo.
+                if (data.errors > 0) lines.push('\n💡 Suas respostas da entrevista não foram perdidas — pode tentar novamente dizendo "sim".');
 
                 updateLastMsg(lines.join('\n'));
               }
@@ -450,7 +522,7 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           } catch { /* skip malformed SSE line */ }
         }
       }
-      return true;
+      return !hadError;
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         setMessages(prev => [...prev, { role: 'assistant', content: '❌ Erro ao conectar com o serviço de geração de documentos. Suas respostas da entrevista NÃO foram perdidas — pode tentar novamente dizendo "sim".' }]);
@@ -590,6 +662,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
 
       // Update interview history
       newHistory.push({ role: 'assistant', content: assistantText, at: new Date().toISOString() });
+      // Salva no servidor a cada turno (fire-and-forget) — permite retomar a entrevista depois
+      // sem repetir as respostas, mesmo que a geração final falhe ou o navegador feche.
+      if (sessionIdRef.current) saveInterviewTranscript(sessionIdRef.current, newHistory).catch(() => {});
 
       if (ready) {
         // PATi signaled [PRONTO_PARA_GERAR] — check if user already confirmed
@@ -602,7 +677,10 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
           // entrevista/encerra a sessão DEPOIS de confirmado sucesso — se a geração falhar
           // (ex.: erro de rede/servidor), a entrevista inteira (já confirmada) não pode ser
           // perdida; mantemos o estado pronto pra o usuário só dizer "sim" de novo.
-          const sidToUse = sessionId;
+          // sessionIdRef (não o state `sessionId`) — este callback é memoizado sem `sessionId`
+          // nas deps, então o state ficaria congelado em `null` (valor inicial) pra sempre,
+          // fazendo `endSession` nunca encerrar a sessão de verdade (ver bug 333100).
+          const sidToUse = sessionIdRef.current;
           const contextFromInterview = newHistory
             .filter(m => m.role === 'user' || m.role === 'assistant')
             .map(m => `${m.role === 'user' ? 'Analista' : 'PATi'}${m.at ? ` [${formatHoraComMs(m.at)}]` : ''}: ${m.content.replace('[PRONTO_PARA_GERAR]', '')}`)
@@ -704,7 +782,9 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
         // PATi already asked "Posso gerar?" — check if user is confirming
         const isConfirm = /(^|\s)(sim|pode|gerar?|vai|manda|ok|bora|claro|vamo|faz|gere|com certeza|logico|obvio|beleza|por favor|pfv|pf|agora|entao)\b/.test(normalizedForInterview);
         if (isConfirm) {
-          const sidToUse = sessionId;
+          // sessionIdRef (não o state `sessionId`) — mesmo motivo do outro ponto de uso: este
+          // callback (`sendMessage`) também não tem `sessionId` nas deps do useCallback.
+          const sidToUse = sessionIdRef.current;
           // A confirmação do analista ("sim"/"pode"/...) precisa entrar no histórico ANTES de
           // montar o InterviewContext — sem isso, a resposta que libera a geração fica visível
           // só no chat da tela, mas nunca é gravada na trilha de auditoria (PDF).
@@ -815,8 +895,14 @@ export default function PatiChat({ filters = {}, onClassifyDone }: { filters?: P
       // Start interview for the first matching ID (or first from list)
       const targetId = docReq.ids[0];
       if (targetId) {
-        const sid = await startSession(targetId, docReq.tipo);
-        const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: [] as { role: string; content: string; at?: string }[], bulk: false, force: docReq.force };
+        const { resumedHistory } = await startSession(targetId, docReq.tipo);
+        if (resumedHistory.length > 0) {
+          // Nem sempre a entrevista anterior ficou "não concluída" (pode já ter gerado um
+          // documento e o analista só quer ajustar algo agora) — mensagem neutra, sem afirmar
+          // que ficou pendente.
+          setMessages(prev => [...prev, { role: 'assistant', content: '🔄 Encontrei informações de entrevistas anteriores para este chamado — retomando de onde você parou, sem precisar repetir as respostas.' }]);
+        }
+        const interviewState = { active: true, workItemId: targetId, tipo: docReq.tipo, history: resumedHistory, bulk: false, force: docReq.force };
         setInterview(interviewState);
         await runInterviewStep('', interviewState);
       } else {

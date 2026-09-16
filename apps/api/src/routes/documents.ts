@@ -8,6 +8,7 @@ import { interviewHistoryToText } from '../utils/context.js';
 import { requireRole } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
 import { tryExtractUser } from '../utils/auth-user.js';
+import { refreshPatiComment } from '../services/devops-sync.js';
 
 const router = Router();
 
@@ -434,7 +435,7 @@ router.post('/generate/stream', async (req: Request, res: Response) => {
   let current = 0;
   let generated = 0;
   let errors = 0;
-  const results: { id: number; title: string; apf?: { totalPF: number; totalHoras: number }; spec?: boolean; error?: string }[] = [];
+  const results: { id: number; title: string; apf?: { totalPF: number; totalHoras: number; elementos: number }; spec?: boolean; error?: string }[] = [];
 
   startHeartbeat();
   for (const item of itemsToProcess) {
@@ -493,11 +494,12 @@ router.post('/generate/stream', async (req: Request, res: Response) => {
           title: item.Title,
           totalPF: result.apf.totalPF,
           totalHoras: result.apf.totalHoras,
+          elementos: result.apf.elementos.length,
           elapsed,
         });
         const existing = results.find(r => r.id === item.Id);
-        if (existing) existing.apf = { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras };
-        else results.push({ id: item.Id, title: item.Title, apf: { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras } });
+        if (existing) existing.apf = { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras, elementos: result.apf.elementos.length };
+        else results.push({ id: item.Id, title: item.Title, apf: { totalPF: result.apf.totalPF, totalHoras: result.apf.totalHoras, elementos: result.apf.elementos.length } });
       } catch (err: any) {
         errors++;
         send({ type: 'error', current, total: totalSteps, pct, id: item.Id, step: 'APF', message: err.message });
@@ -643,11 +645,16 @@ router.post('/sessions', async (req: Request, res: Response) => {
 
   const pool = await getPool();
 
-  // Mark stale sessions as abandoned (inactive > 30 min)
-  await pool.request().query(`
-    UPDATE InterviewSessions SET Status = 'abandoned'
-    WHERE Status = 'active' AND DATEDIFF(MINUTE, LastActivity, GETDATE()) > 30
-  `);
+  // Busca ao vivo o comentário [PATI] mais atual deste chamado ANTES de iniciar a entrevista
+  // (não depende mais da última sincronização geral — ver refreshPatiComment) em paralelo com
+  // a limpeza de sessões obsoletas, já que são independentes.
+  await Promise.all([
+    refreshPatiComment(workItemId),
+    pool.request().query(`
+      UPDATE InterviewSessions SET Status = 'abandoned'
+      WHERE Status = 'active' AND DATEDIFF(MINUTE, LastActivity, GETDATE()) > 30
+    `),
+  ]);
 
   // Check for active sessions from OTHER users for the same chamado+tipo
   const conflicts = await pool.request()
@@ -687,6 +694,55 @@ router.put('/sessions/:sessionId', async (req: Request, res: Response) => {
     .input('sid', sql.NVarChar(100), sessionId)
     .query(`UPDATE InterviewSessions SET LastActivity = GETDATE() WHERE SessionId = @sid AND Status = 'active'`);
   res.json({ ok: true });
+});
+
+// PUT /api/documents/sessions/:sessionId/transcript — salva o histórico da entrevista até
+// agora (chamado a cada turno respondido) — permite RETOMAR de onde parou numa falha de
+// LLM/rede ou se o analista fechar o navegador no meio da entrevista.
+router.put('/sessions/:sessionId/transcript', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { history } = req.body;
+  if (!Array.isArray(history)) return res.status(400).json({ error: 'history deve ser um array' });
+  const pool = await getPool();
+  await pool.request()
+    .input('sid', sql.NVarChar(100), sessionId)
+    .input('transcript', sql.NVarChar(sql.MAX), JSON.stringify(history))
+    .query(`UPDATE InterviewSessions SET TranscriptJson = @transcript, LastActivity = GETDATE() WHERE SessionId = @sid`);
+  res.json({ ok: true });
+});
+
+// GET /api/documents/sessions/resume?workItemId=X&tipo=APF — retorna a entrevista NÃO
+// concluída mais recente do próprio usuário autenticado pra esse chamado+tipo (se houver),
+// pra oferecer retomar em vez de começar do zero. Nunca retorna entrevista de OUTRO usuário.
+router.get('/sessions/resume', async (req: Request, res: Response) => {
+  const wid = parseInt(req.query.workItemId as string);
+  const tipo = req.query.tipo as string;
+  if (isNaN(wid) || !tipo) return res.status(400).json({ error: 'workItemId e tipo são obrigatórios' });
+  const user = tryExtractUser(req.headers.authorization);
+  if (!user?.userId) return res.json({ resumable: false });
+
+  const pool = await getPool();
+  // Mesma garantia de frescor do [PATI] ao RETOMAR uma entrevista (não só ao iniciar uma nova).
+  const [r] = await Promise.all([
+    pool.request()
+      .input('wid', sql.Int, wid)
+      .input('tipo', sql.NVarChar(10), tipo)
+      .input('uid', sql.NVarChar(200), user.userId)
+      .query(`
+        SELECT TOP 1 SessionId, TranscriptJson, LastActivity
+        FROM InterviewSessions
+        WHERE WorkItemId = @wid AND Tipo = @tipo AND UserId = @uid
+          AND Status IN ('active', 'abandoned') AND TranscriptJson IS NOT NULL
+        ORDER BY LastActivity DESC
+      `),
+    refreshPatiComment(wid),
+  ]);
+  const row = r.recordset[0];
+  if (!row) return res.json({ resumable: false });
+  let history: any[] = [];
+  try { history = JSON.parse(row.TranscriptJson) || []; } catch { history = []; }
+  if (history.length === 0) return res.json({ resumable: false });
+  res.json({ resumable: true, sessionId: row.SessionId, history, lastActivity: row.LastActivity });
 });
 
 // DELETE /api/documents/sessions/:sessionId — release session

@@ -196,7 +196,7 @@ function foundryChatUrl(apiUrl: string, apiVersion?: string | null): string {
   return `${origin}/models/chat/completions?api-version=${apiVersion || DEFAULT_AZURE_API_VERSION}`;
 }
 
-// ─── Modelos de raciocínio (o1/o3/o4/gpt-5.x) ───────────────────────────────────
+// ─── Modelos de raciocínio (o1/o3/o4/gpt-5.x/kimi-k2) ──────────────────────────────
 // Esses modelos gastam tokens "invisíveis" de raciocínio dentro do MESMO orçamento de
 // max_completion_tokens (doc oficial: "reserve at least 25,000 tokens for reasoning and
 // output" para tarefas abertas). Nossas tarefas são bem delimitadas (uma pergunta de
@@ -204,7 +204,10 @@ function foundryChatUrl(apiUrl: string, apiVersion?: string | null): string {
 // finalidade — sem isso, o valor hardcoded anterior (500-1024) deixava o modelo gastar
 // tudo em raciocínio interno e devolver resposta vazia/truncada, ou apenas repetir a
 // pergunta no turno seguinte.
-const REASONING_MODEL_RE = /^(o1|o3|o4|gpt-5)/i;
+// "kimi" (Kimi K2, Moonshot AI) também raciocína internamente como o1/o3/gpt-5.x — faltava
+// aqui, então caia no piso baixo (maxTokens padrão) e sempre devolvia resposta vazia com
+// finish_reason=length em entradas grandes (ex.: chamado #318120, entrevista longa).
+const REASONING_MODEL_RE = /^(o1|o3|o4|gpt-5|kimi)/i;
 function isReasoningModel(modelName: string): boolean {
   return REASONING_MODEL_RE.test(modelName);
 }
@@ -212,8 +215,14 @@ function isReasoningModel(modelName: string): boolean {
 const REASONING_MIN_TOKENS: Record<LlmFinalidade, number> = {
   chat: 2000,
   classificacao: 1500,
-  apf_geracao: 6000,
-  apf_refinamento: 6000,
+  // Subido de 6000 pra 16000 após falha real em produção (chamado #318120): tanto o
+  // provider principal (GPT-5.4) quanto o fallback (Kimi K2.6 — que só passou a ser
+  // reconhecido como modelo de raciocínio nesta mesma correção) esgotaram 6000 tokens em
+  // raciocínio interno numa entrevista longa/complexa e devolveram resposta vazia
+  // (finish_reason=length), com a geração de APF falhando por completo (sem fallback
+  // restante). Mesmo padrão já usado em spec_estruturacao (6000 → 16000 → 24000).
+  apf_geracao: 16000,
+  apf_refinamento: 16000,
   spec_geracao: 6000,
   // 'high' reasoning_effort (ver REASONING_EFFORT) consome MUITO mais tokens "invisíveis"
   // de raciocínio dentro do mesmo orçamento — 6000 (suficiente em 'medium') fazia o modelo
@@ -249,10 +258,19 @@ const REASONING_EFFORT: Record<LlmFinalidade, 'low' | 'medium' | 'high'> = {
 const TIMEOUT_MS: Record<LlmFinalidade, number> = {
   chat: 30_000,
   classificacao: 30_000,
-  apf_geracao: 90_000,
-  apf_refinamento: 90_000,
+  apf_geracao: 120_000, // subido de 90s pra 120s junto com o piso de tokens (ver REASONING_MIN_TOKENS)
+  apf_refinamento: 120_000,
   spec_geracao: 90_000,
-  spec_estruturacao: 150_000, // 'high' reasoning_effort custa mais tempo de parede que 'medium'
+  // Subido de 150s pra 240s após falha real em produção (chamado #318120, 2026-09-14): o
+  // orçamento maior de [PATI] injetado na entrevista (ver PATI_INTERVIEW_BUDGET em chat.ts,
+  // 2000→20000 chars) e o contexto acumulado de entrevistas mais longas fazem o GPT-5.4
+  // (primário) precisar de mais tempo de parede pra estruturar a especificação — 150s não
+  // era mais suficiente, o timeout do primário forçava fallback pro Groq, que por sua vez
+  // estourava o limite de tokens/minuto da conta (TPM 8000, tier on_demand) com esse volume
+  // maior de contexto — os dois providers da cadeia falhavam. O SSE já tem heartbeat a cada
+  // 15s (ver startHeartbeat em documents.ts), então esperar mais tempo aqui não derruba a
+  // conexão do usuário.
+  spec_estruturacao: 240_000,
   spec_revisao: 60_000,
 };
 
